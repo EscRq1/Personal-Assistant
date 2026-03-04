@@ -6,9 +6,68 @@ import numpy as np
 from tools.web_search import search_web, fetch_page_text, is_online
 from colorama import Fore, Style, init
 
+
+PLANNER_SYSTEM_PROMPT = ("""
+        You are the TASK PLANNER of a multi-agent AI system.
+
+        Your job is NOT to answer the user.
+
+        Your job is to break the user's request into a minimal sequence of logical steps.
+
+        The agent responsible for execution has already been selected by the system.
+
+        You only produce the ordered task plan.
+
+        Rules:
+        - Never answer the user.
+        - Never generate explanations or code.
+        - Only produce the plan.
+        - Keep the plan minimal and logical.
+        - Return ONLY valid JSON.
+
+        Output format:
+
+        {
+        "steps": [
+            {
+            "step_id": 1,
+            "task": "description of the step"
+            }
+        ],
+        "notes": "short explanation of the plan"
+        }
+
+        Example:
+
+        User request:
+        Fix the bug in my Python script.
+
+        Output:
+
+        {
+        "steps": [
+            {
+            "step_id": 1,
+            "task": "Read the Python file"
+            },
+            {
+            "step_id": 2,
+            "task": "Identify the bug in the code"
+            },
+            {
+            "step_id": 3,
+            "task": "Generate a corrected version of the code"
+            }
+        ],
+        "notes": "Bug fixing requires analyzing the code and generating a fix."
+        }                  
+        """)
+
+
 class Controller:
     def __init__(self, model_name="qwen3:7b"):
-        self.assistant_model = "deepseek-r1:8b" # Generalist
+        self.assistant_model = "phi4-mini:latest"
+        self.planner_model = "deepseek-r1:8b" # Generalist
         self.vision_model = "llava:13b"
         self.coder_model = "qwen3-coder:30b"  # Coding specialist
         self.generate_url = "http://localhost:11434/api/generate"
@@ -98,27 +157,49 @@ class Controller:
             return data["message"]["content"]
 
         return ""
-
-
-    def ask(self, prompt: str,  purpose: str, system_prompt=None, intent="ASSISTANT",
+    
+    
+    def ask(self, prompt: str,  purpose: str, system_prompt=None, intent="PLANNER",
         images_b64=None, model_override=None) -> str:
+        plan = None
 
         # If images exist → force vision model
-        if images_b64 and len(images_b64) > 0:
-            model = self.vision_model
-            temp = self.temps["ASSISTANT"]
-            context = self.context_size["ASSISTANT"]
-
-        elif intent in ("CODE", "DEBUG", "MATH"):
-            model = self.coder_model
-            temp = self.temps["CODER"]
-            context = self.context_size["CODER"]
-
+        if intent == "PLANNER":
+            model = self.planner_model
+            temp = 0
+            context = 4096
         else:
-            model = self.assistant_model
-            temp = self.temps["ASSISTANT"]
-            context = self.context_size["ASSISTANT"]
+            if model_override:
+                model = self.vision_model
+                temp = self.temps["ASSISTANT"]
+                context = self.context_size["ASSISTANT"]
 
+            elif intent in ("CODE", "DEBUG"):
+                model = self.coder_model
+                temp = self.temps["CODER"]
+                context = self.context_size["CODER"]
+                plan = self._call_ollama(self.planner_model, prompt, system_prompt=PLANNER_SYSTEM_PROMPT, target_temp=0, target_context= 4096)
+
+            elif intent in ("LOGIC", "MATH", "TECHNICAL"):
+                model = self.planner_model
+                temp = self.temps["ASSISTANT"]
+                context = self.context_size["ASSISTANT"]
+            else:
+                model = self.assistant_model
+                temp = self.temps["ASSISTANT"]
+                context = self.context_size["ASSISTANT"]  
+
+        if plan:
+            print(f"Plan: {plan}")
+
+            prompt = f"""
+                Execution Plan:
+                {plan}
+
+                User Request:
+                {prompt}
+            """
+            
         print(f"MODEL USED: {model}, PURPOSE: {purpose}")
         print("IMAGES COUNT:", len(images_b64) if images_b64 else 0)
 
@@ -266,12 +347,32 @@ class SemanticController(Controller):
                 "check official docs", "search github issues",
             ],
             "ASSISTANT": [
-                "explain concept", "teach me", "give an overview",
-                "best practices", "recommendations", "roadmap",
-                "help me decide", "summarize", "make a checklist",
+                "explain this", "explain concept", "explain simply",
+                "help me understand", "teach me", "walk me through",
+                "give an overview", "tell me about", "what is",
+                "how does this work", "why does this happen",
+
+                "general explanation", "background information",
+                "describe this topic", "clarify this idea",
+                "explain step by step", "simple explanation",
+
+                "give advice", "recommendations", "suggestions",
+                "help me decide", "what do you think about",
+                "share your thoughts", "opinion on",
+
+                "best practices", "roadmap", "learning path",
+                "how should i start", "where should i begin",
+                "tips for learning",
+
+                "summarize", "summary", "simplify this",
+                "make a checklist", "break it down",
+
+                "general question", "curiosity question",
+                "talk about this topic", "discuss this idea",
+
                 "thank you", "thanks", "got it", "makes sense",
-                "ok", "okay", "cool", "nice", "interesting",
-            ],
+                "ok", "okay", "cool", "nice", "interesting"
+            ]
         }
 
         # 2. Boot Optimization (Persistence)

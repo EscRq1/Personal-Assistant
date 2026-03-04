@@ -46,6 +46,7 @@ class Main:
         )
 
         raw = self.llm.ask( 
+
             prompt=f"{classifier_system}\n\n{classifier_user}",
             purpose = "web check" 
         ).strip().upper()
@@ -141,7 +142,7 @@ class Main:
         if len(user_input.strip()) < 10:
             print(f"{Fore.BLACK}[Observer]: Short input. No checks needed.")
             return
-        if self.llm.last_intent == "CODE":
+        if self.llm.last_intent in ("CODE", "DEBUG"):
             return
 
         raw = self.llm.ask( 
@@ -288,7 +289,8 @@ class Main:
         # Hard priority 2: router selected WEB
         elif intent == "WEB":
             is_autonomous = True
-
+        elif intent in ("CODE", "DEBUG"):
+            is_autonomous = False
         # Otherwise use classifier
         else:
             is_autonomous = self.needs_web_search_autonomous(user_input, recent_history)
@@ -339,7 +341,7 @@ class Main:
         # 9) Profile update
         self.auto_update_profile(user_text_original, response)
 
-        model_label = "CODER" if intent in ("CODE", "DEBUG", "MATH") else "ASSISTANT"
+        model_label = "CODER" if intent in ("CODE", "DEBUG") else "ASSISTANT"
         return {"response": response, "intent": model_label}
 
 assistant = Main()
