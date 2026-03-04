@@ -1,0 +1,500 @@
+@import url('https://fonts.googleapis.com/css2?family=SN+Pro:ital,wght@0,200..900;1,200..900&display=swap');
+html, body {
+    margin: 0;
+    padding: 0;
+    height: 100vh;
+    width: 100vw;
+}
+
+.container {
+    display: grid;
+    height: 100vh;
+    grid-template-columns: 70px 1fr; 
+    grid-template-rows: 50px 1fr;   
+    grid-template-areas: 
+        "sidebar  header"
+        "sidebar content";
+    transition: 0.5s;
+}
+
+
+
+.header {
+    grid-area: header;
+    display: flex;
+    position: sticky;
+    top: 0;
+    background-color: #ffffff;
+    justify-content: center;
+    align-items: center;
+    font-family: "SN Pro", sans-serif;
+    font-optical-sizing: auto;
+    font-weight: 400;
+    font-style: normal;
+    font-size: 20px;
+
+}
+
+.summary {
+    position: relative
+}
+
+.summary:hover{
+    cursor: pointer;
+    background-color: #74747436;
+    border-radius: 10px;
+    padding: 0 5px 0 5px;
+}
+
+.summary:hover::after {
+    display: block;
+}
+
+.summary::after {
+    background-color: rgb(0, 0, 0);
+    color: rgb(255, 255, 255);
+    font-size: 13px;
+    content: var(--snippet, "Ask something to start a new chat");
+    position: absolute;
+    padding: 0 5px 0 5px;
+    display: none;
+    
+    top: 100%; 
+    margin-top: 10px; 
+
+    left: 50%;
+    transform: translateX(-50%); 
+    
+
+    white-space: nowrap; 
+    background: black;
+    color: white;
+    padding: 4px 8px;
+
+
+}
+
+
+.content {
+    grid-area: content;
+    display: grid;
+    grid-template-columns: 1fr 2fr 1fr;
+    grid-template-areas: "filler main list";
+    column-gap: 10px;
+    align-items: flex-end;
+    background-color: #ffffff; 
+    padding-bottom: 30px;
+}
+
+.filler {
+    grid-area: filler;
+    height: 100%;
+    
+}
+
+.filler button {
+    background-color: transparent;
+    border: 0px;
+    display: block;
+    height: 20px;
+    width: 80px;
+    align-items: flex-start;
+    border-radius: 8px;
+}
+
+.filler button:hover {
+    background-color:#74747436 ;
+}
+
+.chat-menu{
+    position: fixed;
+    display: none;
+    flex-direction: column;
+
+    background: #fff;
+    border-radius: 12px;
+    padding: 8px;
+
+    box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+
+    width: 80px;
+    font-family: "SN Pro", sans-serif;
+    font-size: 14px;
+
+    z-index: 9999;
+}
+
+.list {
+    display: none;
+    flex-direction: column;
+    grid-area: list;
+    border: 1px solid gray;
+    padding: 0;
+    margin: 0;
+    width: 15vw;
+    border-radius: 5px;
+    
+    
+}
+
+#m-list { display: none; }
+#m-list.open { display: flex; }
+
+.sub-content{
+    grid-area: main;
+    display: grid;
+    grid-template-rows: 1fr 100px;
+    grid-template-areas: "output" "input";
+    align-items: flex-end;
+    height: 100%;
+}
+
+.output {
+    grid-area: output;
+    height: 100%;
+    overflow-y: auto; 
+    overflow-x: hidden; 
+    display: flex;
+    flex-direction: column; 
+}
+
+
+
+.input-cont {
+  grid-area: input;
+  border: 1px solid gray;
+  border-radius: 25px;
+  display: grid;
+  grid-template-columns: 50px 1fr 120px;
+  grid-template-rows: auto auto 20px;
+  grid-template-areas:
+    "tray tray tray"
+    "input input input"
+    "attach filler mode";
+  column-gap: 5px;
+  width: 50vw;
+  padding: 10px;
+  background-color: white;
+}
+
+.attachment-tray { grid-area: tray; }
+.input { grid-area: input; }
+
+#img-btn { grid-area: attach; }
+#m-btn { grid-area: mode; }
+
+
+.attachment-tray {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+}
+
+.attachment-item {
+    position: relative;
+}
+
+.attachment-item img {
+    max-width: 80px;
+    border-radius: 10px;
+}
+
+.attachment-remove {
+    position: absolute;
+    top: -6px;
+    right: -6px;
+    background: black;
+    color: white;
+    border-radius: 50%;
+    width: 18px;
+    height: 18px;
+    font-size: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+}
+
+
+
+.input {
+    border: 0;
+    outline: 0;
+    resize: none;
+    font-size: 15px;
+    overflow-y: hidden;
+    grid-area: input;
+    max-height: 200px;
+
+    
+
+    
+}
+
+.input:focus {
+    border: none;
+    outline: none;
+    border-width: 0;
+}
+
+.input::placeholder{
+    font-family: Arial, Helvetica, sans-serif;
+    font-size: 17px;
+}
+
+.input::-webkit-scrollbar {
+    width: 6px;
+}
+
+.input::-webkit-scrollbar-thumb {
+    background-color: #ccc;
+    border-radius: 10px;
+}
+
+.i-btn{
+    grid-area: btn;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: 0;
+    background-color: transparent;
+    height: auto;
+    width: auto;
+    font-size: 13px;
+    border-radius: 5px;
+
+}
+
+.i-btn:hover{
+    background-color:#74747436 ;
+}
+
+.sidebar {
+    grid-area: sidebar;
+    display: grid;
+    grid-template-rows: 50px 1fr;
+    grid-template-columns: 1fr 30px;
+    grid-template-areas: "col-btn new-btn"
+                         "chats chats";
+    position: sticky;
+
+
+    
+    background-color: #ecf0f1b7; 
+    justify-content: flex-start; 
+    align-items: flex-start;
+    padding: 15px;
+    overflow-y: scroll;
+    overflow-x: hidden;
+    
+}
+
+
+.col-btn, .new-btn{
+    border: 0;
+    padding: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 100%;
+    background-color: transparent;
+    justify-content: center;
+    align-items: center;
+
+}
+
+.sidebar button:hover {
+    background-color: #74747436;
+}
+
+.col-btn{
+    grid-area: col-btn;
+    display: flex;
+}
+
+.new-btn {
+    grid-area: new-btn;
+    display: none;
+    
+}
+
+
+
+.new-btn::after{
+    background-color: rgb(0, 0, 0);
+    color: rgb(255, 255, 255);
+    font-size: 13px;
+    content: "Create a new chat";
+    position: absolute;
+    padding: 0 5px 0 5px;
+    display: none;
+    
+
+    margin-top: 10px; 
+
+    left: 60%;
+    transform: translateX(-50%); 
+    
+
+    white-space: nowrap; 
+    background: black;
+    color: white;
+    padding: 4px 8px;
+}
+
+.new-btn:hover::after {
+    display: block;
+}
+
+.sb-container{
+    grid-area: chats;
+    height: fit-content;
+    max-width: 270px;
+    display: block;
+    justify-content: center;
+    display: none;
+    
+}
+
+.sidebar p {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.sidebar div{
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 16px;
+    font-family: "SN Pro", sans-serif;
+    height: 30px ;
+    border-radius: 10px;
+    padding: 5px;
+    width: 100%;
+}
+
+.sidebar div:hover{
+    background-color: #74747436;
+}
+
+.menu-btn{
+    display: none;
+    border: 0px;
+    border-radius: 30px;
+    width: 30px;
+    height: 30px;
+    background-color: inherit;
+    background: transparent;
+    justify-content: center;
+    align-items: center;
+    
+}
+
+.menu-btn img {
+    height: 20px;
+    width: 20px;
+    content: url("./assets/ellipsis-vertical-solid-full.svg");
+}
+
+
+
+
+.sidebar div:hover .menu-btn {
+    display: flex;
+}
+
+
+.sidebar::-webkit-scrollbar {
+    height: 5px;
+}
+
+.sidebar::-webkit-scrollbar-thumb {
+    background: #80808054;
+    border-radius: 10px;
+}
+
+.sidebar::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.msg {
+  max-width: 80%;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 12px;
+  line-height: 1.4;
+  word-wrap: break-word;
+  white-space: normal;
+}
+
+.msg .meta { font-size: 12px; opacity: 0.7; margin-bottom: 6px; }
+.msg .tag { font-weight: 600; }
+
+.msg.user {
+  margin-left: auto;
+  background: #e7f0ff;
+  border: 1px solid #cfe0ff;
+}
+
+.msg.assistant {
+    max-width: 85%;
+    width: fit-content;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+}
+
+.msg.thinking { color: #777; font-style: italic; }
+
+.text pre {
+    background: #1e1e1e;
+    color: #dcdcdc;
+    padding: 15px;
+    border-radius: 10px;
+    margin: 10px 0;
+
+    /* This allows the block to be scrollable horizontally */
+    max-width: 100%; 
+    overflow-x: auto; 
+    
+    /* Ensure long lines don't wrap internally unless you want them to */
+    white-space: pre; 
+    
+    font-family: 'Consolas', 'Monaco', monospace;
+    font-size: 13px;
+}
+
+.text pre::-webkit-scrollbar {
+    height: 6px;
+}
+
+.text pre::-webkit-scrollbar-thumb {
+    background: #444;
+    border-radius: 10px;
+}
+
+.text pre::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.text code {
+    font-family: 'Consolas', 'Courier New', monospace;
+    background: #f0f0f0;
+    padding: 2px 4px;
+    border-radius: 4px;
+}
+
+.text pre code {
+    background: transparent; /* Reset for blocks */
+    padding: 0;
+}
+
+.text {
+    white-space: pre-wrap; 
+    word-break: break-word;
+}
+
+.text ul, .text ol {
+    padding-left: 25px;
+}
