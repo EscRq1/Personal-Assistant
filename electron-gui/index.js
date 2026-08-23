@@ -19,11 +19,12 @@ const ain = document.getElementById("ai-input");
 const list = document.getElementById("m-list");
 const btn = document.getElementById("m-btn");
 
-const options = document.querySelectorAll(".code, .auto, .assistant");
 
 const imgBtn = document.getElementById("img-btn");
 const imgInput = document.getElementById("img-input");
 const attachmentTray = document.getElementById("attachment-tray");
+
+const toggleInput = document.querySelector(".switch input[type='checkbox']");
 
 let isCollapsed = true;
 let isHistory = false;
@@ -33,6 +34,9 @@ let currentChatId = null;
 
 let saveInFlight = null;
 let isSaving = false;
+
+let isSearching = false;
+
 
 let pendingImages = [];
 
@@ -46,7 +50,6 @@ console.log({
     imgBtn,
     imgInput
 });
-
 // ==========================================
 // 2. BUSY STATE
 // ==========================================
@@ -117,48 +120,98 @@ async function saveCurrentChat() {
 // ==========================================
 // 4. SIDEBAR HISTORY
 // ==========================================
+
+function isPinned(value) {
+    return value === true ||
+        value === 1 ||
+        value === "1" ||
+        String(value).trim().toLowerCase() === "true";
+}
+
+
 async function loadSidebarHistory() {
-
     try {
+        const response = await fetch(
+            "http://localhost:5000/history"
+        );
 
-        const response = await fetch("http://localhost:5000/history");
-        const history = await response.json();
+        const payload = await response
+            .json()
+            .catch(() => null);
+
+        if (!response.ok) {
+            throw new Error(
+                payload?.message ||
+                `History request failed: ${response.status}`
+            );
+        }
+
+        // Supports both the current array response and a future
+        // { history: [...] } response without breaking the UI.
+        const history = Array.isArray(payload)
+            ? payload
+            : Array.isArray(payload?.history)
+                ? payload.history
+                : [];
 
         chatList.innerHTML = "";
 
-        history.forEach(item => {
-
+        history.forEach((item) => {
             const div = document.createElement("div");
+
+            div.dataset.chatId = item.id;
+            div.dataset.pinned = isPinned(item.pinned)
+                ? "1"
+                : "0";
 
             div.insertAdjacentHTML("afterbegin", `
                 <p>
-                    ${item.pinned ? '<span class="pin">📌</span>' : ''}
-                    ${item.title}
+                    ${
+                        isPinned(item.pinned)
+                            ? '<span class="pin">📌</span>'
+                            : ""
+                    }
+                    ${escapeHtml(item.title || "Legacy Chat")}
                 </p>
-                <button class="menu-btn" data-id="${item.id}">
-                    <img src="./assets/ellipsis-vertical-solid-full.svg">
+
+                <button
+                    class="menu-btn"
+                    data-id="${escapeHtml(item.id)}"
+                    aria-label="Chat menu"
+                >
+                    <img
+                        src="./assets/ellipsis-vertical-solid-full.svg"
+                        alt=""
+                    >
                 </button>
             `);
 
-            div.onclick = async (e) => {
-
-                if (e.target.closest(".menu-btn")) return;
+            div.onclick = async (event) => {
+                if (event.target.closest(".menu-btn")) return;
                 if (isSaving) return;
 
-                header.innerText = item.title;
-                header.style.setProperty("--snippet", `"${item.snippet}"`);
+                header.innerText =
+                    item.title || "Legacy Chat";
+
+                header.style.setProperty(
+                    "--snippet",
+                    JSON.stringify(
+                        item.snippet ||
+                        "No summary available"
+                    )
+                );
 
                 await loadChat(item.id);
             };
 
             chatList.appendChild(div);
-
         });
 
-    } catch (err) {
-
-        console.error("History load failed:", err);
-
+    } catch (error) {
+        console.error(
+            "History load failed:",
+            error
+        );
     }
 }
 
@@ -194,41 +247,81 @@ document.addEventListener("click", () => {
 
 });
 
+async function askRename() {
+  return new Promise(resolve => {
+    // backdrop
+    const overlay = document.createElement("div");
+    overlay.style.position = "fixed";
+    overlay.style.inset = "0";
+    overlay.style.background = "rgba(0,0,0,0.4)";
+    overlay.style.backdropFilter = "blur(2px)";
+    overlay.style.zIndex = "99998";
+    overlay.style.display = "flex";
+    overlay.style.alignItems = "center";
+    overlay.style.justifyContent = "center";
 
-function askRename() {
+    // modal box
+    const modal = document.createElement("div");
+    modal.style.background = "#fff";
+    modal.style.padding = "24px 22px";
+    modal.style.borderRadius = "14px";
+    modal.style.boxShadow = "0 20px 60px rgba(0,0,0,0.25)";
+    modal.style.zIndex = "99999";
+    modal.style.minWidth = "320px";
+    modal.style.fontFamily = "system-ui, -apple-system, Segoe UI, Roboto, sans-serif";
 
-    return new Promise(resolve => {
+    modal.innerHTML = `
+      <div style="font-weight:600; margin-bottom:12px; font-size:15px;">Rename chat</div>
+      <input id="rename-input" placeholder="New chat name" style="
+        width:100%; padding:10px 12px; border:1px solid #e2e2e2; border-radius:8px;
+        outline:none; font-size:14px; margin-bottom:14px; box-sizing:border-box;
+      ">
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button id="rename-cancel" style="
+          padding:8px 14px; border:1px solid #e2e2e2; background:#f7f7f7; border-radius:8px;
+          cursor:pointer; font-size:13px;
+        ">Cancel</button>
+        <button id="rename-ok" style="
+          padding:8px 16px; border:none; background:#111; color:white; border-radius:8px;
+          cursor:pointer; font-size:13px;
+        ">OK</button>
+      </div>
+    `;
 
-        const modal = document.createElement("div");
+    overlay.appendChild(modal);
+    document.body.appendChild(overlay);
 
-        modal.style.position = "fixed";
-        modal.style.top = "50%";
-        modal.style.left = "50%";
-        modal.style.transform = "translate(-50%, -50%)";
-        modal.style.background = "white";
-        modal.style.padding = "20px";
-        modal.style.borderRadius = "10px";
-        modal.style.boxShadow = "0 10px 30px rgba(0,0,0,0.2)";
-        modal.style.zIndex = "99999";
+    const input = modal.querySelector("#rename-input");
+    input.focus();
+    input.select();
 
-        modal.innerHTML = `
-            <input id="rename-input" placeholder="New chat name" style="width:200px;padding:5px">
-            <button id="rename-ok">OK</button>
-        `;
+    const close = (value) => {
+      overlay.remove();
+      resolve(value);
+    };
 
-        document.body.appendChild(modal);
+    // prevent clicks inside modal from closing
+    modal.addEventListener("click", e => e.stopPropagation());
 
-        const input = modal.querySelector("#rename-input");
-        input.focus();
+    // outside click closes
+    overlay.addEventListener("click", () => close(null));
 
-        modal.querySelector("#rename-ok").onclick = () => {
-            const value = input.value.trim();
-            modal.remove();
-            resolve(value);
-        };
+    // buttons
+    modal.querySelector("#rename-ok").onclick = () => {
+      const value = input.value.trim();
+      if (value) close(value);
+    };
+    modal.querySelector("#rename-cancel").onclick = () => close(null);
 
+    // Enter to submit, Esc to cancel
+    input.addEventListener("keydown", e => {
+      if (e.key === "Enter") {
+        const value = input.value.trim();
+        if (value) close(value);
+      }
+      if (e.key === "Escape") close(null);
     });
-
+  });
 }
 // ==========================================
 // 6. MENU ACTIONS
@@ -269,14 +362,45 @@ async function chatMenu(type) {
 
         case 2: {
             menu.style.display = "none";
+
             const pinForm = new FormData();
             pinForm.append("id", id);
 
-            await fetch("http://localhost:5000/pin", {
-                method: "POST",
-                body: pinForm
-            });
-            loadSidebarHistory();
+            pinBtn.disabled = true;
+
+            try {
+                const response = await fetch(
+                    "http://localhost:5000/pin",
+                    {
+                        method: "POST",
+                        body: pinForm,
+                    }
+                );
+
+                const result = await response
+                    .json()
+                    .catch(() => ({}));
+
+                if (!response.ok) {
+                    throw new Error(
+                        result.message ||
+                        `Pin request failed: ${response.status}`
+                    );
+                }
+
+                // Wait for the refreshed, backend-sorted list.
+                await loadSidebarHistory();
+
+            } catch (error) {
+                console.error(
+                    "Pin toggle failed:",
+                    error
+                );
+
+            } finally {
+                pinBtn.disabled = false;
+                menu.dataset.id = "";
+            }
 
             break;
         }
@@ -310,12 +434,10 @@ async function chatMenu(type) {
 // 7. LOAD CHAT
 // ==========================================
 async function loadChat(chatId) {
-
-    currentChatId = chatId;
-
     try {
-
-        if (saveInFlight) await saveInFlight;
+        if (saveInFlight) {
+            await saveInFlight;
+        }
 
         const hadMessages = outputDiv.children.length > 0;
 
@@ -323,45 +445,52 @@ async function loadChat(chatId) {
             await saveCurrentChat();
         }
 
+        // Set this only after the previous chat is saved.
+        currentChatId = chatId;
         isHistory = true;
 
         outputDiv.innerHTML = "";
 
-        const response = await fetch(`http://localhost:5000/chat/${chatId}`);
-        const data = await response.json();
+        const response = await fetch(
+            `http://localhost:5000/chat/${chatId}`
+        );
 
+        if (!response.ok) {
+            throw new Error(
+                `Chat request failed: ${response.status}`
+            );
+        }
+
+        const data = await response.json();
         const interactions = data.content.split("[TURN_END]");
 
-        interactions.forEach(line => {
-
+        interactions.forEach((line) => {
             line = line.trim();
             if (!line) return;
 
             const parts = line.split(" | ");
 
-            parts.forEach(part => {
-
+            parts.forEach((part) => {
                 part = part.trimStart();
 
                 if (part.startsWith("User: ")) {
-                    appendMessage(outputDiv, "user", part.slice(6));
+                    appendMessage(
+                        outputDiv,
+                        "user",
+                        part.slice(6)
+                    );
+                } else if (part.startsWith("Assistant: ")) {
+                    appendMessage(
+                        outputDiv,
+                        "assistant",
+                        part.slice(11)
+                    );
                 }
-
-                else if (part.startsWith("Assistant: ")) {
-                    appendMessage(outputDiv, "assistant", part.slice(11));
-                }
-
             });
-
         });
-        
-
     } catch (err) {
-
         console.error("Chat load failed:", err);
-
     }
-
 }
 
 
@@ -418,33 +547,14 @@ document.getElementById("btn").addEventListener("click", () => {
 // ==========================================
 // 10. MODE SELECTOR
 // ==========================================
-btn.addEventListener("click", (e) => {
+// 1. Just toggle the menu when the button is clicked. No propagation stopping.
 
-    e.stopPropagation();
-    list.classList.toggle("open");
-
+toggleInput.addEventListener("change", (event) => {
+        
+    isSearching = event.target.checked;
+    
 });
 
-list.addEventListener("click", (e) => e.stopPropagation());
-
-document.addEventListener("click", () => {
-    list.classList.remove("open");
-});
-
-
-options.forEach(element => {
-
-    element.addEventListener("click", () => {
-
-        const modeName = element.querySelector('p').innerText;
-
-        btn.innerHTML = "Mode: " + modeName;
-
-        list.style.display = "none";
-
-    });
-
-});
 
 
 // ==========================================
@@ -480,42 +590,57 @@ function escapeHtml(str) {
 
 }
 
-
-function appendMessage(outputDiv, role, content, intent = "") {
-
-    const cls = role === "user" ? "msg user" : "msg assistant";
-    const meta = role === "user"
-        ? "You"
-        : `Assistant <span class="tag">[${intent}]</span>`;
-
-    let bodyContent = "";
+function updateMessage(element, role, content) {
 
     if (role === "assistant") {
 
         try {
-            bodyContent = window.electronAPI.parseMarkdown(content);
+            element.innerHTML =
+                window.electronAPI.parseMarkdown(content);
+
         } catch {
-            bodyContent = escapeHtml(content).replaceAll("\n", "<br>");
+            element.innerHTML =
+                escapeHtml(content).replaceAll("\n", "<br>");
         }
 
     } else {
 
-        bodyContent = escapeHtml(content).replaceAll("\n", "<br>");
-
+        element.innerHTML =
+            escapeHtml(content).replaceAll("\n", "<br>");
     }
+}
 
-    outputDiv.insertAdjacentHTML("beforeend", `
-        <div class="${cls}">
-            <div class="meta">${meta}</div>
-            <div class="text">${bodyContent}</div>
-        </div>
-    `);
+function appendMessage(outputDiv, role, content = "") {
+
+    const cls = role === "user" ? "msg user" : "msg assistant";
+    const meta = role === "user"
+        ? "You"
+        : "Assistant";
+
+    const message = document.createElement("div");
+    message.className = cls;
+
+    const metaElement = document.createElement("div");
+    metaElement.className = "meta";
+    metaElement.innerText = meta;
+
+    const textElement = document.createElement("div");
+    textElement.className = "text";
+
+    message.appendChild(metaElement);
+    message.appendChild(textElement);
+
+    outputDiv.appendChild(message);
+
+    // Render initial content
+    updateMessage(textElement, role, content);
 
     outputDiv.scrollTo({
         top: outputDiv.scrollHeight,
-        behavior: 'smooth'
+        behavior: "smooth"
     });
 
+    return textElement;
 }
 
 
@@ -524,7 +649,6 @@ async function sendMessage() {
 
     if (!query && pendingImages.length === 0) return;
 
-    const currentMode = btn.innerText.replace("Mode: ", "").trim();
 
     // append text bubble
     if (query) appendMessage(outputDiv, "user", query);
@@ -542,7 +666,7 @@ async function sendMessage() {
             "beforeend",
             `
       <div class="msg user">
-        <div class="meta">You</div>
+        <div class="meta">Pics</div>
         <div class="text">${imagesHtml}</div>
       </div>
       `
@@ -567,30 +691,124 @@ async function sendMessage() {
     try {
         const form = new FormData();
         form.append("query", query);
-        form.append("mode", currentMode);
+        form.append("websearch", isSearching);
 
         pendingImages.forEach((img) => form.append("image", img));
 
         // continue the same long-term chat if we loaded one
         if (currentChatId) form.append("chat_id", currentChatId);
 
+        pendingImages = [];
+        attachmentTray.innerHTML = "";
+        imgInput.value = "";
+
         const response = await fetch("http://localhost:5000/ask", {
             method: "POST",
             body: form,
         });
 
-        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(`Server returned ${response.status}`);
+        }
+
+        if (!response.body) {
+            throw new Error("Response body is not streamable");
+        }
+    
 
         // clear image UI state
-        pendingImages = [];
-        attachmentTray.innerHTML = "";
-        imgInput.value = "";
+        
 
         // remove loading bubble
         document.getElementById(loadingId)?.remove();
 
-        // append assistant
-        appendMessage(outputDiv, "assistant", data.response, data.intent);
+
+        // Create empty assistant message
+        const assistantTextElement =
+            appendMessage(outputDiv, "assistant", "");
+
+
+        // Accumulate the raw model response
+        let fullResponse = "";
+
+
+        // Start reading SSE stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        let buffer = "";
+
+        while (true) {
+
+            const { value, done } = await reader.read();
+
+            if (done) break;
+
+            buffer += decoder.decode(value, {
+                stream: true
+            });
+
+
+            // SSE events are separated by blank lines
+            const events = buffer.split("\n\n");
+
+            // Keep incomplete event for next network chunk
+            buffer = events.pop();
+
+
+            for (const event of events) {
+
+                const line = event.trim();
+
+                if (!line.startsWith("data: "))
+                    continue;
+
+                const data = line.slice(6);
+
+
+                if (data === "[DONE]") {
+                    continue;
+                }
+
+
+                try {
+
+                    const parsed = JSON.parse(data);
+
+                    const token = parsed.token;
+
+                    if (!token)
+                        continue;
+
+
+                    // Add token to complete response
+                    fullResponse += token;
+
+
+                    // Re-render existing message
+                    updateMessage(
+                        assistantTextElement,
+                        "assistant",
+                        fullResponse
+                    );
+
+
+                    // Keep newest text visible
+                    outputDiv.scrollTop =
+                        outputDiv.scrollHeight;
+
+                } catch (error) {
+
+                    console.error(
+                        "Stream parsing error:",
+                        error,
+                        data
+                    );
+
+                }
+            }
+        }
+
 
         // refresh sidebar
         await loadSidebarHistory();
@@ -609,7 +827,10 @@ async function sendMessage() {
 
     } catch (err) {
         const loadingEl = document.getElementById(loadingId);
-        if (loadingEl) loadingEl.innerText = "Error: Python server is offline.";
+        if (loadingEl) {
+            loadingEl.innerText =
+                `Error: ${err.message || "Request failed."}`;
+        }
         console.error(err);
     }
 }
