@@ -183,7 +183,28 @@ class Main:
         # replace current short-term with seeded history
         if seeded:
             self.short_term_memory = seeded
+    def categorize_query(self, user_input):
+        CATEGORIZATION_PROMPT = (
+            "You are the main workflow request classifier.\n\n"
+            "Classify the user's request only. You do not know or interact with "
+            "internal observer, memory, RAG, vision, or background systems.\n\n"
 
+            "Return exactly one JSON object:\n"
+            "{\n"
+            '  "intent": "...",\n'
+            '  "complexity": "low|medium|high",\n'
+            '  "needs_web": true,\n'
+            '  "needs_code": false,\n'
+            '  "reasoning_mode": "off|low|xhigh",\n'
+            '  "confidence": 0.0\n'
+            "}\n\n"
+
+            "The main workflow handles conversation, reasoning, planning, "
+            "tool use, coding delegation, and final responses.\n\n"
+
+            "Do not mention internal models, observers, RAG, memory systems, "
+            "vision pipelines, or routing infrastructure."
+        )
     def process_query(self, user_input, is_forced_search, images=None, restored_memory=None):
         user_text_original = user_input  # keep clean copy for memory
         t0 = time.perf_counter()

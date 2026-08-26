@@ -14,14 +14,15 @@ from resource_manager import resource_manager
 from colorama import Fore, init
 import chromadb
 
-
 from rag_gates import (
     RAGGate,
     MEMORY_ANCHORS,
     CONVERSATIONAL_ANCHORS,
+    CONTEXTUAL_FOLLOWUP_ANCHORS,
 )
 
 init(autoreset=True)
+
 
 ALLOWED_PROFILE_FIELDS = {
     "Name",
@@ -33,10 +34,23 @@ ALLOWED_PROFILE_FIELDS = {
     "Location",
 }
 
+
 FEEDBACK_ONLY = {
-    "thanks", "thank you", "thx", "ty",
-    "ok", "okay", "got it", "nice", "cool", "great",
-    "yes", "yep", "no", "nope", "sure",
+    "thanks",
+    "thank you",
+    "thx",
+    "ty",
+    "ok",
+    "okay",
+    "got it",
+    "nice",
+    "cool",
+    "great",
+    "yes",
+    "yep",
+    "no",
+    "nope",
+    "sure",
 }
 
 
@@ -47,6 +61,7 @@ class MemoryManager:
             db_path = os.path.join(base, "memory_db")
 
         self.persist_directory = db_path
+
         self.client = chromadb.PersistentClient(
             path=self.persist_directory
         )
@@ -54,28 +69,232 @@ class MemoryManager:
         self.history = self.client.get_or_create_collection(
             name="chat_history"
         )
+
         self.profile_col = self.client.get_or_create_collection(
             name="user_profile"
         )
+
         self.intent_col = self.client.get_or_create_collection(
             name="rag_intent_anchors"
         )
+
         self.profile_cache = self._load_profile()
         self.last_profile_update_ts = 0
 
-        print(f"{Fore.CYAN}Loading Jina reranker...")
-
         self.resource_manager = resource_manager
         self.rag_gate = RAGGate()
+
+        # Jina is lazy-loaded through ResourceManager.
         self.reranker = None
+
+        # Ensure semantic intent anchors exist.
+        self._ensure_intent_anchors()
+
+    # ============================================================
+    # Jina
+    # ============================================================
 
     def _get_reranker(self):
         if self.resource_manager is None:
             raise RuntimeError(
                 "MemoryManager requires a ResourceManager"
             )
+
         self.resource_manager.acquire("jina")
         return self.resource_manager.get_jina()
+
+    # ============================================================
+    # RAG semantic intent
+    # ============================================================
+
+    def _ensure_intent_anchors(self):
+        """
+        Ensure all current semantic intent anchors exist.
+
+        This is incremental so adding new anchors later does not
+        require deleting the existing Chroma collection.
+        """
+        existing = self.intent_col.get(
+            include=["documents", "metadatas"],
+        )
+
+        existing_ids = set(existing.get("ids") or [])
+
+        ids = []
+        documents = []
+        metadatas = []
+
+        for i, text in enumerate(MEMORY_ANCHORS):
+            anchor_id = f"memory_{i}"
+            if anchor_id in existing_ids:
+                continue
+
+            ids.append(anchor_id)
+            documents.append(text)
+            metadatas.append({"intent": "memory"})
+
+        for i, text in enumerate(CONVERSATIONAL_ANCHORS):
+            anchor_id = f"social_{i}"
+            if anchor_id in existing_ids:
+                continue
+
+            ids.append(anchor_id)
+            documents.append(text)
+            metadatas.append({"intent": "social"})
+
+        for i, text in enumerate(CONTEXTUAL_FOLLOWUP_ANCHORS):
+            anchor_id = f"followup_{i}"
+            if anchor_id in existing_ids:
+                continue
+
+            ids.append(anchor_id)
+            documents.append(text)
+            metadatas.append({"intent": "followup"})
+
+        if not ids:
+            print(
+                f"{Fore.CYAN}"
+                "[RAG GATE] semantic anchors already up to date"
+            )
+            return
+
+        self.intent_col.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+        )
+
+        print(
+            f"{Fore.CYAN}"
+            f"[RAG GATE] added {len(ids)} semantic anchors"
+        )
+
+    def _semantic_intent_scores(self, query: str):
+        try:
+            count = self.intent_col.count()
+
+            if count == 0:
+                print(
+                    f"{Fore.YELLOW}"
+                    "[RAG GATE] semantic anchor "
+                    "collection is empty"
+                )
+                return 0.0, 0.0, 0.0
+
+            results = self.intent_col.query(
+                query_texts=[query],
+                n_results=min(12, count),
+                include=["metadatas", "distances"],
+            )
+
+            metadatas = (
+                results.get("metadatas") or [[]]
+            )[0] or []
+
+            distances = (
+                results.get("distances") or [[]]
+            )[0] or []
+
+            best_memory = 0.0
+            best_social = 0.0
+            best_followup = 0.0
+
+            for metadata, distance in zip(metadatas, distances):
+                if distance is None:
+                    continue
+
+                similarity = 1.0 / (1.0 + float(distance))
+                intent = metadata.get("intent")
+
+                if intent == "memory":
+                    best_memory = max(best_memory, similarity)
+                elif intent == "social":
+                    best_social = max(best_social, similarity)
+                elif intent == "followup":
+                    best_followup = max(best_followup, similarity)
+
+            return best_memory, best_social, best_followup
+
+        except Exception as e:
+            print(
+                f"{Fore.YELLOW}"
+                f"[RAG GATE] semantic anchor lookup failed: {e}"
+            )
+            return 0.0, 0.0, 0.0
+
+    def _history_relevance_gate(self, distances):
+        """
+        Classify Chroma's best match into quality zones.
+
+        Chroma always returns nearest neighbours. A neighbour is not
+        automatically a relevant memory, so this stage is deliberately
+        conservative before we spend VRAM on Jina.
+        """
+        if not distances:
+            return False, 0.0, "weak"
+
+        values = sorted(
+            float(d)
+            for d in distances
+            if d is not None
+        )
+
+        if not values:
+            return False, 0.0, "weak"
+
+        best = values[0]
+
+        STRONG_DISTANCE = 1.20
+        AMBIGUOUS_DISTANCE = 1.50
+
+        if best <= STRONG_DISTANCE:
+            relevance = max(
+                0.0,
+                min(
+                    1.0,
+                    1.0 - best / STRONG_DISTANCE,
+                ),
+            )
+
+            print(
+                f"{Fore.GREEN}"
+                f"[RAG CHROMA] strong: "
+                f"best_distance={best:.4f} "
+                f"relevance={relevance:.3f}"
+            )
+
+            return True, relevance, "strong"
+
+        if best <= AMBIGUOUS_DISTANCE:
+            relevance = max(
+                0.0,
+                min(
+                    1.0,
+                    1.0 - best / AMBIGUOUS_DISTANCE,
+                ),
+            )
+
+            print(
+                f"{Fore.YELLOW}"
+                f"[RAG CHROMA] ambiguous: "
+                f"best_distance={best:.4f} "
+                f"relevance={relevance:.3f}"
+            )
+
+            return True, relevance, "ambiguous"
+
+        print(
+            f"{Fore.YELLOW}"
+            f"[RAG CHROMA] weak: "
+            f"best_distance={best:.4f} "
+            f"> ambiguous threshold={AMBIGUOUS_DISTANCE:.4f}"
+        )
+
+        return False, 0.0, "weak"
+
+    # ============================================================
+    # Profile helpers
+    # ============================================================
 
     @staticmethod
     def normalize_pin_value(value) -> int:
@@ -87,7 +306,10 @@ class MemoryManager:
             return 1 if int(value) == 1 else 0
 
         return (
-            1 if str(value).strip().lower() in {"1", "true", "yes", "on"} else 0
+            1
+            if str(value).strip().lower()
+            in {"1", "true", "yes", "on"}
+            else 0
         )
 
     def _load_profile(self) -> dict:
@@ -96,9 +318,11 @@ class MemoryManager:
             data = self.profile_col.get(
                 ids=["user_core_profile"]
             )
+
             if data and data.get("documents"):
                 raw = data["documents"][0]
                 return json.loads(raw) if raw else {}
+
         except Exception:
             pass
 
@@ -111,102 +335,27 @@ class MemoryManager:
                 self.profile_cache,
                 ensure_ascii=False,
             )
+
             self.profile_col.upsert(
                 documents=[payload],
                 ids=["user_core_profile"],
-            )
-        except Exception as e:
-            print(f"{Fore.RED}[Profile Save Error]: {e}")
-
-    def _ensure_intent_anchors(self):
-        """
-        Create semantic intent anchors once.
-
-        Chroma uses its existing embedding function, so this is CPU-side
-        semantic classification and does not require Jina.
-        """
-
-        try:
-            existing = self.intent_col.count()
-
-            if existing > 0:
-                return
-
-            ids = []
-            documents = []
-            metadatas = []
-
-            for index, text in enumerate(MEMORY_ANCHORS):
-                ids.append(f"memory_{index}")
-                documents.append(text)
-                metadatas.append({"intent": "memory"})
-
-            for index, text in enumerate(CONVERSATIONAL_ANCHORS):
-                ids.append(f"social_{index}")
-                documents.append(text)
-                metadatas.append({"intent": "social"})
-
-            self.intent_col.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas,
-            )
-
-            print(
-                f"{Fore.CYAN}"
-                f"[RAG GATE] initialized {len(ids)} semantic anchors"
             )
 
         except Exception as e:
             print(
                 f"{Fore.RED}"
-                f"[RAG GATE] failed to initialize anchors: {e}"
-            )
-    def _semantic_intent_scores(self, query: str):
-        try:
-            results = self.intent_col.query(
-                query_texts=[query],
-                n_results=min(10, self.intent_col.count()),
-                include=["metadatas", "distances"],
+                f"[Profile Save Error]: {e}"
             )
 
-            metadatas = (results.get("metadatas") or [[]])[0] or []
-            distances = (results.get("distances") or [[]])[0] or []
+    # ============================================================
+    # History
+    # ============================================================
 
-            best_memory = 0.0
-            best_social = 0.0
-
-            for metadata, distance in zip(metadatas, distances):
-                if distance is None:
-                    continue
-
-                # Convert distance into a bounded similarity-like score.
-                # We only need relative ranking here.
-                similarity = 1.0 / (1.0 + float(distance))
-
-                intent = metadata.get("intent")
-
-                if intent == "memory":
-                    best_memory = max(best_memory, similarity)
-
-                elif intent == "social":
-                    best_social = max(best_social, similarity)
-
-            return best_memory, best_social
-
-        except Exception as e:
-            print(
-                f"{Fore.YELLOW}"
-                f"[RAG GATE] semantic anchor lookup failed: {e}"
-            )
-
-            return 0.0, 0.0
-
-    # ---------- History ----------
     def add_history(self, text: str, summary: dict):
         doc_id = str(uuid.uuid4())
 
         metadata = dict(summary or {})
+
         metadata["pinned"] = self.normalize_pin_value(
             metadata.get("pinned", 0)
         )
@@ -216,6 +365,7 @@ class MemoryManager:
             ids=[doc_id],
             metadatas=[metadata],
         )
+
         return doc_id
 
     def get_history_metadata(
@@ -224,6 +374,7 @@ class MemoryManager:
     ) -> dict | None:
         """Return a copy of one chat's metadata."""
         chat_id = (chat_id or "").strip()
+
         if not chat_id:
             return None
 
@@ -236,6 +387,7 @@ class MemoryManager:
             return None
 
         metadatas = data.get("metadatas") or []
+
         if not metadatas:
             return {}
 
@@ -243,6 +395,7 @@ class MemoryManager:
 
     def delete_history(self, chat_id: str) -> bool:
         chat_id = (chat_id or "").strip()
+
         if not chat_id:
             return False
 
@@ -251,15 +404,20 @@ class MemoryManager:
                 ids=[chat_id],
                 include=[],
             )
+
             if not data.get("ids"):
                 return False
 
-            self.history.delete(ids=[chat_id])
+            self.history.delete(
+                ids=[chat_id]
+            )
+
             return True
 
         except Exception as e:
             print(
-                f"{Fore.RED}[Delete History Error]: {e}"
+                f"{Fore.RED}"
+                f"[Delete History Error]: {e}"
             )
             return False
 
@@ -275,25 +433,30 @@ class MemoryManager:
             return False
 
         try:
-            meta = self.get_history_metadata(chat_id)
+            meta = self.get_history_metadata(
+                chat_id
+            )
+
             if meta is None:
                 return False
 
             meta["title"] = new_title
+
             meta["pinned"] = self.normalize_pin_value(
                 meta.get("pinned", 0)
             )
 
-            # Metadata-only update: preserves the stored document.
             self.history.update(
                 ids=[chat_id],
                 metadatas=[meta],
             )
+
             return True
 
         except Exception as e:
             print(
-                f"{Fore.RED}[Rename History Error]: {e}"
+                f"{Fore.RED}"
+                f"[Rename History Error]: {e}"
             )
             return False
 
@@ -310,21 +473,27 @@ class MemoryManager:
             None: invalid/missing chat
         """
         chat_id = (chat_id or "").strip()
+
         if not chat_id:
             return None
 
-        meta = self.get_history_metadata(chat_id)
+        meta = self.get_history_metadata(
+            chat_id
+        )
+
         if meta is None:
             return None
 
         current = self.normalize_pin_value(
             meta.get("pinned", 0)
         )
-        new_value = 0 if current == 1 else 1
+
+        new_value = (
+            0 if current == 1 else 1
+        )
 
         meta["pinned"] = new_value
 
-        # Update metadata only. Do not upsert/re-embed the document.
         self.history.update(
             ids=[chat_id],
             metadatas=[meta],
@@ -337,13 +506,19 @@ class MemoryManager:
         existing = self.history.get(
             include=["documents"]
         )
+
         if not existing.get("ids"):
             return
 
-        documents = existing.get("documents") or []
+        documents = existing.get(
+            "documents"
+        ) or []
+
         ids_to_delete = []
 
-        for index, chat_id in enumerate(existing["ids"]):
+        for index, chat_id in enumerate(
+            existing["ids"]
+        ):
             document = (
                 documents[index]
                 if index < len(documents)
@@ -351,16 +526,26 @@ class MemoryManager:
             ) or ""
 
             if len(document) < 15:
-                ids_to_delete.append(chat_id)
+                ids_to_delete.append(
+                    chat_id
+                )
 
         if ids_to_delete:
-            self.history.delete(ids=ids_to_delete)
-            print(
-                f"{Fore.RED}Cleaned "
-                f"{len(ids_to_delete)} junk history items."
+            self.history.delete(
+                ids=ids_to_delete
             )
 
-    # ---------- Profile merge ----------
+            print(
+                f"{Fore.RED}"
+                f"Cleaned "
+                f"{len(ids_to_delete)} "
+                f"junk history items."
+            )
+
+    # ============================================================
+    # Profile merge
+    # ============================================================
+
     def merge_profile_fact(
         self,
         field: str,
@@ -372,8 +557,10 @@ class MemoryManager:
 
         if field not in ALLOWED_PROFILE_FIELDS:
             return False
+
         if len(value) < 2 or value.endswith("?"):
             return False
+
         if confidence < 0.6:
             return False
 
@@ -383,22 +570,29 @@ class MemoryManager:
         now = time.time()
         existing = self.profile_cache.get(field)
 
-        # A global cooldown can cause unrelated profile facts to be silently
-        # discarded (for example Name blocks Education for 180 seconds).
-        # Keep cooldown information per field instead.
-        last_field_update = float(existing.get("updated_at", 0.0)) if existing else 0.0
+        last_field_update = (
+            float(existing.get("updated_at", 0.0))
+            if existing
+            else 0.0
+        )
+
         if (
             last_field_update
             and now - last_field_update < 180
             and existing
-            and float(confidence) < float(existing.get("confidence", 0.0)) + 0.05
+            and float(confidence)
+                < float(
+                    existing.get("confidence", 0.0)
+                ) + 0.05
         ):
             return False
 
         if (
             existing
             and float(confidence)
-            < float(existing.get("confidence", 0.0)) - 0.10
+                < float(
+                    existing.get("confidence", 0.0)
+                ) - 0.10
         ):
             return False
 
@@ -409,14 +603,20 @@ class MemoryManager:
                 "alternatives": [],
                 "updated_at": now,
             }
+
             self._save_profile()
             self.last_profile_update_ts = now
+
             return True
 
         if existing.get("value") == value:
             old_conf = float(
-                existing.get("confidence", 0.0)
+                existing.get(
+                    "confidence",
+                    0.0,
+                )
             )
+
             new_conf = max(
                 old_conf,
                 float(confidence),
@@ -427,62 +627,98 @@ class MemoryManager:
 
             existing["confidence"] = new_conf
             existing["updated_at"] = now
+
             self.profile_cache[field] = existing
             self._save_profile()
             self.last_profile_update_ts = now
+
             return True
 
-        old_conf = float(existing.get("confidence", 0.0))
+        old_conf = float(
+            existing.get(
+                "confidence",
+                0.0,
+            )
+        )
 
-        # A materially stronger fact should become the primary value instead
-        # of being trapped as an alternative that is never shown to the model.
         if float(confidence) >= old_conf + 0.05:
             alternatives = [
-                item for item in existing.get("alternatives", [])
+                item
+                for item in existing.get(
+                    "alternatives",
+                    [],
+                )
                 if item.get("value") != value
             ]
-            if existing.get("value") and existing.get("value") != value:
+
+            if (
+                existing.get("value")
+                and existing.get("value") != value
+            ):
                 alternatives.append({
                     "value": existing["value"],
                     "confidence": old_conf,
                 })
+
             existing = {
                 "value": value,
                 "confidence": float(confidence),
                 "alternatives": alternatives[-5:],
                 "updated_at": now,
             }
+
             self.profile_cache[field] = existing
             self._save_profile()
             self.last_profile_update_ts = now
+
             return True
 
-        alternatives = existing.get("alternatives", [])
+        alternatives = existing.get(
+            "alternatives",
+            [],
+        )
 
         for alternative in alternatives:
             if alternative.get("value") != value:
                 continue
-            old_alt_conf = float(alternative.get("confidence", 0.0))
-            new_alt_conf = max(old_alt_conf, float(confidence))
+
+            old_alt_conf = float(
+                alternative.get(
+                    "confidence",
+                    0.0,
+                )
+            )
+
+            new_alt_conf = max(
+                old_alt_conf,
+                float(confidence),
+            )
+
             if new_alt_conf == old_alt_conf:
                 return False
+
             alternative["confidence"] = new_alt_conf
             existing["alternatives"] = alternatives
             existing["updated_at"] = now
+
             self.profile_cache[field] = existing
             self._save_profile()
             self.last_profile_update_ts = now
+
             return True
 
         alternatives.append({
             "value": value,
             "confidence": float(confidence),
         })
+
         existing["alternatives"] = alternatives[-5:]
         existing["updated_at"] = now
+
         self.profile_cache[field] = existing
         self._save_profile()
         self.last_profile_update_ts = now
+
         return True
 
     def get_profile_summary(
@@ -494,6 +730,7 @@ class MemoryManager:
             return ""
 
         lines = []
+
         order = [
             "Name",
             "Education",
@@ -510,16 +747,20 @@ class MemoryManager:
 
             entry = self.profile_cache[key]
             main_value = entry.get("value", "")
+
             if not main_value:
                 continue
 
-            lines.append(f"{key}: {main_value}")
+            lines.append(
+                f"{key}: {main_value}"
+            )
 
             if include_alternatives:
                 alternatives = entry.get(
                     "alternatives",
                     [],
                 )
+
                 top_alternatives = sorted(
                     alternatives,
                     key=lambda item: item.get(
@@ -530,13 +771,21 @@ class MemoryManager:
                 )[:2]
 
                 for alternative in top_alternatives:
-                    value = alternative.get("value")
+                    value = alternative.get(
+                        "value"
+                    )
+
                     if value:
-                        lines.append(f"  - alt: {value}")
+                        lines.append(
+                            f"  - alt: {value}"
+                        )
 
         return "\n".join(lines)
 
-    # ---------- Context retrieval ----------
+    # ============================================================
+    # Context retrieval
+    # ============================================================
+
     def get_raw_context(
         self,
         query: str,
@@ -547,9 +796,9 @@ class MemoryManager:
     ):
         t0 = time.perf_counter()
 
-        # ============================================================
-        # Stage 0/1: cheap lexical + fuzzy gate
-        # ============================================================
+        # ========================================================
+        # Stage 0: cheap lexical / fuzzy gate
+        # ========================================================
 
         basic = self.rag_gate.evaluate_basic(query)
 
@@ -557,10 +806,14 @@ class MemoryManager:
             f"[RAG GATE] basic: "
             f"use_rag={basic['use_rag']} "
             f"confidence={basic['confidence']:.3f} "
-            f"reason={basic['reason']}"
+            f"reason={basic['reason']} "
+            f"followup={basic.get('followup', 0.0):.3f}"
         )
 
-        if not basic["use_rag"] and basic["confidence"] <= 0.05:
+        if basic["reason"] in {
+            "exact_conversational_anchor",
+            "fuzzy_conversational_anchor",
+        }:
             return {
                 "history": [],
                 "profile_summary": self.get_profile_summary(
@@ -568,28 +821,48 @@ class MemoryManager:
                 ),
             }
 
-        # ============================================================
-        # Stage 2: semantic intent gate
-        # ============================================================
+        # ========================================================
+        # Stage 1: semantic intent
+        # ========================================================
 
-        semantic_memory, semantic_social = (
-            self._semantic_intent_scores(query)
-        )
+        (
+            semantic_memory,
+            semantic_social,
+            semantic_followup,
+        ) = self._semantic_intent_scores(query)
 
         print(
             f"[RAG GATE] semantic: "
             f"memory={semantic_memory:.3f} "
-            f"social={semantic_social:.3f}"
+            f"social={semantic_social:.3f} "
+            f"followup={semantic_followup:.3f}"
         )
 
-        # If both intent signals strongly favor social conversation,
-        # don't touch the history collection at all.
+        memory_intent = max(
+            basic.get("memory", 0.0),
+            semantic_memory,
+        )
+
+        social_intent = max(
+            basic.get("social", 0.0),
+            semantic_social,
+        )
+
+        followup_intent = max(
+            basic.get("followup", 0.0),
+            semantic_followup,
+        )
+
+        # Avoid even touching Chroma for clear social queries.
         if (
-            semantic_social >= 0.70
-            and semantic_social > semantic_memory + 0.10
-            and basic.get("memory", 0.0) < 0.25
+            social_intent >= 0.60
+            and social_intent > memory_intent + 0.10
+            and followup_intent < 0.55
         ):
-            print("[RAG GATE] rejected: semantic conversational intent")
+            print(
+                "[RAG GATE] rejected: "
+                "semantic conversational intent"
+            )
 
             return {
                 "history": [],
@@ -598,18 +871,19 @@ class MemoryManager:
                 ),
             }
 
-        # ============================================================
-        # Stage 3: cheap Chroma history retrieval
-        # ============================================================
+        # ========================================================
+        # Stage 2: cheap Chroma history retrieval
+        # ========================================================
 
         history_docs = []
+        history_found = False
+        history_relevance = 0.0
+        history_zone = "weak"
 
         try:
             history_count = self.history.count()
 
             if history_count > 0:
-                # Retrieve several whole conversations.
-                # Jina will later inspect the turns inside them.
                 fetch_n = min(
                     k + (3 if exclude_chat_id else 0),
                     history_count,
@@ -625,29 +899,34 @@ class MemoryManager:
                     ],
                 )
 
-                docs = (results.get("documents") or [[]])[0] or []
-                ids = (results.get("ids") or [[]])[0] or []
+                docs = (
+                    results.get("documents") or [[]]
+                )[0] or []
+
+                ids = (
+                    results.get("ids") or [[]]
+                )[0] or []
+
                 distances = (
                     results.get("distances") or [[]]
                 )[0] or []
 
-                best_history_similarity = 0.0
+                print(
+                    "[RAG CHROMA]",
+                    list(zip(distances, ids)),
+                )
 
-                if distances:
-                    finite_distances = [
-                        float(d)
-                        for d in distances
-                        if d is not None
-                    ]
-
-                    if finite_distances:
-                        best_distance = min(finite_distances)
-                        best_history_similarity = (
-                            1.0 / (1.0 + best_distance)
-                        )
+                (
+                    history_found,
+                    history_relevance,
+                    history_zone,
+                ) = self._history_relevance_gate(distances)
 
                 for doc_id, document in zip(ids, docs):
-                    if exclude_chat_id and doc_id == exclude_chat_id:
+                    if (
+                        exclude_chat_id
+                        and doc_id == exclude_chat_id
+                    ):
                         continue
 
                     if document:
@@ -656,46 +935,34 @@ class MemoryManager:
                     if len(history_docs) >= k:
                         break
 
-            else:
-                best_history_similarity = 0.0
-
         except Exception as e:
             print(
                 f"{Fore.RED}"
                 f"Error fetching history: {e}"
             )
 
-            best_history_similarity = 0.0
+            history_found = False
+            history_relevance = 0.0
+            history_zone = "weak"
 
         t1 = time.perf_counter()
 
         print(
-            f"[TIMING] history collections fetching "
-            f"{t1 - t0:.3f}s"
+            f"[TIMING] history collections "
+            f"fetching {t1 - t0:.3f}s"
         )
 
-        # ============================================================
-        # Stage 4: final pre-Jina decision
-        # ============================================================
+        # ========================================================
+        # Stage 3: hard Chroma gate
+        # ========================================================
 
-        decision = self.rag_gate.combine(
-            basic,
-            semantic_memory,
-            semantic_social,
-            best_history_similarity,
-        )
+        if not history_found:
+            print(
+                f"{Fore.YELLOW}"
+                "[RAG GATE] rejected: "
+                "no sufficiently relevant history"
+            )
 
-        print(
-            f"[RAG GATE] final: "
-            f"use_rag={decision['use_rag']} "
-            f"confidence={decision['confidence']:.3f}"
-        )
-        print(
-            f"[RAG GATE] "
-            f"{decision['reason']}"
-        )
-
-        if not decision["use_rag"] or not history_docs:
             return {
                 "history": [],
                 "profile_summary": self.get_profile_summary(
@@ -703,14 +970,79 @@ class MemoryManager:
                 ),
             }
 
-        # ============================================================
+        # ========================================================
+        # Stage 4: explicit-memory vs contextual-follow-up route
+        # ========================================================
+
+        margin = memory_intent - social_intent
+
+        memory_route = (
+            memory_intent >= 0.55
+            and margin >= 0.08
+            and history_zone in {"strong", "ambiguous"}
+        )
+
+        followup_route = (
+            followup_intent >= 0.55
+            and history_zone == "strong"
+            and social_intent < 0.75
+        )
+
+        ambiguous_followup_route = (
+            followup_intent >= 0.65
+            and memory_intent >= 0.40
+            and history_zone == "ambiguous"
+            and social_intent < 0.75
+        )
+
+        use_rag = (
+            memory_route
+            or followup_route
+            or ambiguous_followup_route
+        )
+
+        print(
+            f"[RAG GATE] final signals: "
+            f"memory={memory_intent:.3f}, "
+            f"social={social_intent:.3f}, "
+            f"followup={followup_intent:.3f}, "
+            f"margin={margin:.3f}, "
+            f"history={history_relevance:.3f}, "
+            f"zone={history_zone}"
+        )
+
+        routes = []
+        if memory_route:
+            routes.append("memory")
+        if followup_route:
+            routes.append("followup")
+        if ambiguous_followup_route:
+            routes.append("ambiguous_followup")
+
+        print(
+            "[RAG GATE] route: "
+            + ("+".join(routes) if routes else "none")
+        )
+
+        if not use_rag or not history_docs:
+            print(
+                f"{Fore.YELLOW}"
+                "[RAG GATE] rejected: "
+                "insufficient retrieval evidence"
+            )
+
+            return {
+                "history": [],
+                "profile_summary": self.get_profile_summary(
+                    include_alternatives=False
+                ),
+            }
+
+        # ========================================================
         # Stage 5: extract ALL turns from selected conversations
-        # ============================================================
+        # ========================================================
 
         candidates = []
-
-        # Keep diversity so one gigantic conversation doesn't consume
-        # the entire reranker budget.
         per_conversation_limit = 50
 
         for document in history_docs:
@@ -740,9 +1072,11 @@ class MemoryManager:
             f"{t2 - t1:.3f}s"
         )
 
-        # ============================================================
-        # Stage 6: Jina — only now do we acquire GPU
-        # ============================================================
+        # ========================================================
+        # Stage 6: Jina reranking
+        # ========================================================
+
+        relevant_turns = []
 
         try:
             MAX_JINA_CANDIDATES = 150
@@ -767,8 +1101,6 @@ class MemoryManager:
                     f"[CANDIDATE {index}]\n{excerpt}"
                 )
 
-            # This is where GPU ownership changes.
-            # Assistant/Observer are released and Jina gets the GPU.
             reranker = self._get_reranker()
 
             results = reranker.rerank(
@@ -777,16 +1109,20 @@ class MemoryManager:
                 top_n=min(8, len(rerank_documents)),
             )
 
-            relevant_turns = []
-
             if results:
                 top_score = float(
-                    results[0].get("relevance_score", 0.0)
+                    results[0].get(
+                        "relevance_score",
+                        0.0,
+                    )
                 )
 
                 for result in results:
                     score = float(
-                        result.get("relevance_score", 0.0)
+                        result.get(
+                            "relevance_score",
+                            0.0,
+                        )
                     )
 
                     if score < MIN_RELEVANCE:
@@ -825,7 +1161,6 @@ class MemoryManager:
                 f"{Fore.RED}"
                 f"Jina reranking failed: {e}"
             )
-            relevant_turns = []
 
         t3 = time.perf_counter()
 
@@ -834,9 +1169,9 @@ class MemoryManager:
             f"{t3 - t2:.3f}s"
         )
 
-        # ============================================================
+        # ========================================================
         # Stage 7: final context budget
-        # ============================================================
+        # ========================================================
 
         selected = []
         current_chars = 0
