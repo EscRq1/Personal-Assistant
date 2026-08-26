@@ -55,7 +55,7 @@ class Main:
             '{"title": "Weather Inquiry", "snippet": "User asked about current weather in Tashkent."}\n'
             "STRICT: ONLY OUTPUT JSON."
         )
-        raw_output = self.llm.ask(summary_prompt, purpose="chat summary", max_tokens = 1024)
+        raw_output = self.llm.ask(summary_prompt, purpose="chat summary")
         try:
             cleaned = raw_output.strip()
             try:
@@ -118,7 +118,6 @@ class Main:
         raw = self.llm.ask(
             extraction_prompt, 
             purpose="profile update",
-            max_tokens = 256
         ).strip()
 
         try:
