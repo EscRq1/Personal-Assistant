@@ -65,10 +65,12 @@ class Controller:
                 self.memory_call,
             )
 
+        register_control_tool("high_thinking")
+        register_control_tool("xhigh_thinking")
 
         self.tool_controller = ToolController(self)
 
-        register_control_tool("callCoder")
+        
         
 
     def parse_vision_output(self, raw):
@@ -281,10 +283,10 @@ class Controller:
                 call
                 for call in tool_calls
                 if (
-                    (call.get("function") or {}).get("name")
-                    == "callCoder"
+                    (call.get("function") or {}).get("name") in ["high_thinking" , "xhigh_thinking"]   
                 )
             ]
+
             if coder_calls:
 
                 coder_call = coder_calls[0]
@@ -303,6 +305,17 @@ class Controller:
 
                 task = arguments.get("task", "").strip()
                 context = arguments.get("context", "").strip()
+                tool_name = function.get("name", "")
+
+                if tool_name == "high_thinking":
+                    mode = "high"
+
+                elif tool_name == "xhigh_thinking":
+                    mode = "xhigh"
+
+                else:
+                    yield "\n\n[Coder] Invalid thinking mode."
+                    return
 
                 if not task:
                     yield "\n\n[Coder] Missing task."
@@ -310,13 +323,14 @@ class Controller:
 
                 print(
                     f"{Fore.CYAN}"
-                    "[AGENT] transferring control to coding mode"
+                    f"[AGENT] transferring control to coding mode in {mode} mode"
                 )
 
                 for token in self.callCoder(
                     task=task,
                     context=context,
                     messages=messages,
+                    mode = mode,
                 ):
                     yield token
 
@@ -411,6 +425,7 @@ class Controller:
         task: str,
         context: str,
         messages: list[dict],
+        mode: str,
     ):
         messages = list(messages)
 
@@ -441,11 +456,12 @@ class Controller:
                     "cache_prompt": True,
 
                     "chat_template_kwargs": {
-                        "reasoning_effort": "high",
+                        "reasoning_effort": mode,
                     },
 
                     "tools": self.tool_controller.get_coding_tools(
                         web_enabled=True,
+                        mode = mode
                     ),
 
                     "tool_choice": "auto",
@@ -509,6 +525,62 @@ class Controller:
                     accumulated_tools
                 )
             )
+
+            thinking_calls = [
+                call
+                for call in tool_calls
+                if (
+                    (call.get("function") or {}).get("name")
+                    in {"high_thinking", "xhigh_thinking"}
+                )
+            ]
+
+            if thinking_calls:
+                thinking_call = thinking_calls[0]
+
+                function = thinking_call.get("function") or {}
+                tool_name = function.get("name", "")
+
+                try:
+                    arguments = json.loads(
+                        function.get("arguments", "{}")
+                    )
+                except json.JSONDecodeError as exc:
+                    yield f"\n\n[Coder] Invalid escalation arguments: {exc}"
+                    return
+
+                task = arguments.get("task", "").strip()
+                context = arguments.get("context", "").strip()
+
+                if not task:
+                    yield "\n\n[Coder] Missing escalation task."
+                    return
+
+                if tool_name != "xhigh_thinking":
+                    yield "\n\n[Coder] Invalid escalation tool."
+                    return
+
+                reason = arguments.get("reason", "").strip()
+
+                print(
+                    f"{Fore.YELLOW}"
+                    "[CODER] escalating high -> xhigh"
+                )
+
+                escalation_context = (
+                    f"{context}\n\n"
+                    f"WHY HIGH WAS INSUFFICIENT:\n{reason}"
+                )
+
+                for token in self.callCoder(
+                    task=task,
+                    context=escalation_context,
+                    messages=messages,
+                    mode="xhigh",
+                ):
+                    yield token
+
+                return
 
             # ----------------------------------------------------
             # No more tools -> coding answer is finished.
@@ -1627,19 +1699,27 @@ class ToolController:
 
     def get_coding_tools(
         self,
+        mode: str,
         web_enabled: bool = True,
     ) -> list[dict]:
-        """
-        Tools available after control has been transferred to coding mode.
 
-        Coding mode keeps access to the existing instruments, but cannot
-        recursively invoke callCoder again.
-        """
+        tools = self.get_available_tools(
+            web_enabled=web_enabled
+        )
+
+        if mode == "high":
+            blocked = {"high_thinking"}
+
+        elif mode == "xhigh":
+            blocked = {"high_thinking", "xhigh_thinking"}
+
+        else:
+            raise ValueError(
+                f"Unknown coding mode: {mode}"
+            )
 
         return [
             tool
-            for tool in self.get_available_tools(
-                web_enabled=web_enabled
-            )
-            if tool["function"]["name"] != "callCoder"
+            for tool in tools
+            if tool["function"]["name"] not in blocked
         ]
