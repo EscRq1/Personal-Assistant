@@ -316,8 +316,22 @@ class ResourceManager:
         self.current_owner = GPUResource.OBSERVER
 
     def _allocate_jina(self):
+        # Router is the source of truth.
+        # Jina cannot coexist with a loaded llama.cpp model.
+        if self._is_loaded(self.assistant_model):
+            self._unload_llama_model(
+                self.assistant_model
+            )
+
+        if self._is_loaded(self.observer_model):
+            self._unload_llama_model(
+                self.observer_model
+            )
+
         jina = self._create_jina()
+
         self.current_owner = GPUResource.JINA
+
         return jina
 
     def _release_current(self):
