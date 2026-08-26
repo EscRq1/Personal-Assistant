@@ -11,6 +11,7 @@ from tools.web_search import (
 from tools.tool_registry import (
     get_registered_tools,
     register_tool,
+    register_control_tool
 )
 
 from tools.execute import (
@@ -21,6 +22,9 @@ from tools.execute import (
 from colorama import Fore
 from resource_manager import resource_manager
 from memory_manager import memory_manager
+
+
+MAX_ITERATIONS = 8
 
 
 class Controller:
@@ -61,7 +65,10 @@ class Controller:
                 self.memory_call,
             )
 
+
         self.tool_controller = ToolController(self)
+
+        register_control_tool("callCoder")
         
 
     def parse_vision_output(self, raw):
@@ -87,6 +94,7 @@ class Controller:
     # ============================================================
     # Assistant streaming
     # ============================================================
+        
 
     def callAssistant(
         self,
@@ -127,18 +135,18 @@ class Controller:
         })
 
         # Prevent an accidental infinite tool loop.
-        max_iterations = 8
+        MAX_ITERATIONS = 8
 
         # ========================================================
         # AGENT LOOP
         # ========================================================
 
-        for iteration in range(max_iterations):
+        for iteration in range(MAX_ITERATIONS):
 
             print(
                 f"{Fore.CYAN}"
                 f"[AGENT] generation phase "
-                f"{iteration + 1}/{max_iterations}"
+                f"{iteration + 1}/{MAX_ITERATIONS}"
             )
 
             # ----------------------------------------------------
@@ -269,6 +277,51 @@ class Controller:
                 )
             )
 
+            coder_calls = [
+                call
+                for call in tool_calls
+                if (
+                    (call.get("function") or {}).get("name")
+                    == "callCoder"
+                )
+            ]
+            if coder_calls:
+
+                coder_call = coder_calls[0]
+
+                function = coder_call.get("function") or {}
+
+                try:
+                    arguments = json.loads(
+                        function.get("arguments", "{}")
+                    )
+                except json.JSONDecodeError as exc:
+                    yield (
+                        f"\n\n[Coder] Invalid arguments: {exc}"
+                    )
+                    return
+
+                task = arguments.get("task", "").strip()
+                context = arguments.get("context", "").strip()
+
+                if not task:
+                    yield "\n\n[Coder] Missing task."
+                    return
+
+                print(
+                    f"{Fore.CYAN}"
+                    "[AGENT] transferring control to coding mode"
+                )
+
+                for token in self.callCoder(
+                    task=task,
+                    context=context,
+                    messages=messages,
+                ):
+                    yield token
+
+                return
+            
             # ========================================================
             # NO TOOL CALL
             #
@@ -353,6 +406,79 @@ class Controller:
             "\n\n[Agent] Maximum tool-call iterations reached."
         )
 
+    def callCoder(
+        self,
+        task: str,
+        context: str,
+        messages: list[dict],
+        ):
+        messages = list(messages)
+
+        messages.append({
+            "role": "user",
+            "content": (
+                "Enter coding mode now.\n\n"
+                f"TASK:\n{task}\n\n"
+                f"CONTEXT:\n{context}"
+            ),
+        })
+
+        with self.resources.lock:
+
+            self.resources.acquire("assistant")
+
+            payload = {
+                "model": self.assistant_model,
+                "messages": messages,
+                "temperature": 0.2,
+                "max_tokens": -1,
+                "stream": True,
+                "cache_prompt": True,
+                "chat_template_kwargs": {
+                    "reasoning_effort": "xhigh",
+                },
+            }
+
+            print(
+                f"{Fore.CYAN}"
+                "[CODER] Qwen coding mode / xhigh"
+            )
+
+            with requests.post(
+                self.chat_endpoint,
+                json=payload,
+                stream=True,
+                timeout=self.request_timeout,
+            ) as response:
+
+                response.raise_for_status()
+
+                for line in response.iter_lines():
+
+                    if not line:
+                        continue
+
+                    line = line.decode("utf-8")
+
+                    if not line.startswith("data: "):
+                        continue
+
+                    data = line[6:]
+
+                    if data == "[DONE]":
+                        break
+
+                    chunk = json.loads(data)
+
+                    delta = (
+                        chunk["choices"][0].get("delta")
+                        or {}
+                    )
+
+                    token = delta.get("content")
+
+                    if token:
+                        yield token
     def callObserver(self, prompt, system_prompt=None, images_b64=None, max_tokens=-1):
         #same lock
         with self.resources.lock:
