@@ -411,7 +411,7 @@ class Controller:
         task: str,
         context: str,
         messages: list[dict],
-        ):
+    ):
         messages = list(messages)
 
         messages.append({
@@ -423,62 +423,149 @@ class Controller:
             ),
         })
 
-        with self.resources.lock:
+        for iteration in range(MAX_ITERATIONS):
 
-            self.resources.acquire("assistant")
+            content_parts = []
+            accumulated_tools = {}
 
-            payload = {
-                "model": self.assistant_model,
-                "messages": messages,
-                "temperature": 0.2,
-                "max_tokens": -1,
-                "stream": True,
-                "cache_prompt": True,
-                "chat_template_kwargs": {
-                    "reasoning_effort": "xhigh",
-                },
-            }
+            with self.resources.lock:
+
+                self.resources.acquire("assistant")
+
+                payload = {
+                    "model": self.assistant_model,
+                    "messages": messages,
+                    "temperature": 0.2,
+                    "max_tokens": 8192,
+                    "stream": True,
+                    "cache_prompt": True,
+
+                    "chat_template_kwargs": {
+                        "reasoning_effort": "high",
+                    },
+
+                    "tools": self.tool_controller.get_coding_tools(
+                        web_enabled=True,
+                    ),
+
+                    "tool_choice": "auto",
+                    "parse_tool_calls": True,
+                    "parallel_tool_calls": False,
+                }
+
+                print(
+                    f"{Fore.CYAN}"
+                    f"[CODER] generation phase "
+                    f"{iteration + 1}/{MAX_ITERATIONS}"
+                )
+
+                with requests.post(
+                    self.chat_endpoint,
+                    json=payload,
+                    stream=True,
+                    timeout=self.request_timeout,
+                ) as response:
+
+                    response.raise_for_status()
+
+                    for line in response.iter_lines():
+
+                        if not line:
+                            continue
+
+                        line = line.decode("utf-8")
+
+                        if not line.startswith("data: "):
+                            continue
+
+                        data = line[6:]
+
+                        if data == "[DONE]":
+                            break
+
+                        chunk = json.loads(data)
+
+                        delta = (
+                            chunk["choices"][0].get("delta")
+                            or {}
+                        )
+
+                        token = delta.get("content")
+
+                        if token:
+                            content_parts.append(token)
+                            yield token
+
+                        tool_deltas = delta.get("tool_calls")
+
+                        if tool_deltas:
+                            self.tool_controller.merge_tool_call_deltas(
+                                accumulated_tools,
+                                tool_deltas,
+                            )
+
+            tool_calls = (
+                self.tool_controller.finalize_tool_calls(
+                    accumulated_tools
+                )
+            )
+
+            # ----------------------------------------------------
+            # No more tools -> coding answer is finished.
+            # ----------------------------------------------------
+
+            if not tool_calls:
+                print(
+                    f"{Fore.GREEN}"
+                    "[CODER] final answer"
+                )
+                return
+
+            # ----------------------------------------------------
+            # Coding mode may use normal instruments.
+            # ----------------------------------------------------
+
+            self.tool_controller.print_tool_batch(
+                tool_calls
+            )
+
+            assistant_content = "".join(
+                content_parts
+            )
+
+            messages.append(
+                self.tool_controller.build_assistant_tool_message(
+                    content=assistant_content,
+                    tool_calls=tool_calls,
+                )
+            )
+
+            results = (
+                self.tool_controller.execute_tool_calls(
+                    tool_calls
+                )
+            )
+
+            results = self.tool_controller.compress_web_batch(
+                results
+            )
+
+            for result in results:
+                messages.append(
+                    self.tool_controller.build_tool_message(
+                        result
+                    )
+                )
 
             print(
                 f"{Fore.CYAN}"
-                "[CODER] Qwen coding mode / xhigh"
+                "[CODER] tool execution complete; "
+                "returning control to coder"
             )
 
-            with requests.post(
-                self.chat_endpoint,
-                json=payload,
-                stream=True,
-                timeout=self.request_timeout,
-            ) as response:
-
-                response.raise_for_status()
-
-                for line in response.iter_lines():
-
-                    if not line:
-                        continue
-
-                    line = line.decode("utf-8")
-
-                    if not line.startswith("data: "):
-                        continue
-
-                    data = line[6:]
-
-                    if data == "[DONE]":
-                        break
-
-                    chunk = json.loads(data)
-
-                    delta = (
-                        chunk["choices"][0].get("delta")
-                        or {}
-                    )
-
-                    token = delta.get("content")
-
-                    if token:
-                        yield token
+        yield (
+            "\n\n[Coder] Maximum tool-call iterations reached."
+        )
     def callObserver(self, prompt, system_prompt=None, images_b64=None, max_tokens=-1):
         #same lock
         with self.resources.lock:
@@ -1537,3 +1624,22 @@ class ToolController:
                     '{}'
                 )}"
             )
+
+    def get_coding_tools(
+        self,
+        web_enabled: bool = True,
+    ) -> list[dict]:
+        """
+        Tools available after control has been transferred to coding mode.
+
+        Coding mode keeps access to the existing instruments, but cannot
+        recursively invoke callCoder again.
+        """
+
+        return [
+            tool
+            for tool in self.get_available_tools(
+                web_enabled=web_enabled
+            )
+            if tool["function"]["name"] != "callCoder"
+        ]
