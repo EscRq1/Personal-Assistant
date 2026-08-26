@@ -2,6 +2,9 @@ import os
 import json
 import uuid
 import time
+import sqlite3
+import hashlib
+import re
 
 # Environment setup must happen before importing Hugging Face / Chroma.
 os.environ["HF_HUB_OFFLINE"] = "1"
@@ -70,6 +73,18 @@ class MemoryManager:
             name="chat_history"
         )
 
+        # Retrieval-optimized turn-level index. The legacy chat_history
+        # collection remains the canonical archive/UI store.
+        self.memory_turns = self.client.get_or_create_collection(
+            name="memory_turns"
+        )
+
+        self.fts_path = os.path.join(
+            self.persist_directory,
+            "memory_turns_fts.sqlite3",
+        )
+        self._init_fts()
+
         self.profile_col = self.client.get_or_create_collection(
             name="user_profile"
         )
@@ -89,6 +104,313 @@ class MemoryManager:
 
         # Ensure semantic intent anchors exist.
         self._ensure_intent_anchors()
+
+        # One-time migration of the existing whole-chat archive into the
+        # retrieval-optimized turn index.
+        self._ensure_turn_index()
+
+    # ============================================================
+    # Turn-level / hybrid retrieval index
+    # ============================================================
+
+    def _init_fts(self):
+        with sqlite3.connect(self.fts_path) as conn:
+            conn.execute(
+                """
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_turns_fts
+                USING fts5(
+                    turn_id UNINDEXED,
+                    chat_id UNINDEXED,
+                    text,
+                    tokenize='porter unicode61'
+                )
+                """
+            )
+            conn.commit()
+
+    @staticmethod
+    def _turn_id(chat_id: str, turn_index: int, text: str) -> str:
+        payload = f"{chat_id}:{turn_index}:{text}".encode("utf-8")
+        return hashlib.sha1(payload).hexdigest()
+
+    @staticmethod
+    def _split_turns(document: str) -> list[str]:
+        return [
+            turn.strip()
+            for turn in (document or "").split("[TURN_END]")
+            if turn.strip()
+        ]
+
+    def _delete_turn_index_for_chat(self, chat_id: str):
+        if not chat_id:
+            return
+
+        try:
+            existing = self.memory_turns.get(
+                where={"chat_id": chat_id},
+                include=[],
+            )
+            ids = existing.get("ids") or []
+            if ids:
+                self.memory_turns.delete(ids=ids)
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] Chroma cleanup failed: {exc}"
+            )
+
+        with sqlite3.connect(self.fts_path) as conn:
+            conn.execute(
+                "DELETE FROM memory_turns_fts WHERE chat_id = ?",
+                (chat_id,),
+            )
+            conn.commit()
+
+    def sync_turn_index(
+        self,
+        chat_id: str,
+        document: str,
+        metadata: dict | None = None,
+    ) -> int:
+        """Rebuild the search index for one archived conversation."""
+        chat_id = str(chat_id or "").strip()
+        if not chat_id:
+            return 0
+
+        turns = self._split_turns(document)
+        self._delete_turn_index_for_chat(chat_id)
+
+        if not turns:
+            return 0
+
+        metadata = dict(metadata or {})
+        title = str(metadata.get("title") or "")
+        timestamp = str(metadata.get("timestamp") or "")
+        pinned = int(bool(metadata.get("pinned", 0)))
+
+        ids = []
+        documents = []
+        metadatas = []
+
+        for turn_index, turn in enumerate(turns):
+            turn_id = self._turn_id(
+                chat_id,
+                turn_index,
+                turn,
+            )
+            ids.append(turn_id)
+            documents.append(turn)
+            metadatas.append({
+                "chat_id": chat_id,
+                "turn_index": turn_index,
+                "title": title,
+                "timestamp": timestamp,
+                "pinned": pinned,
+            })
+
+        self.memory_turns.add(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+        )
+
+        with sqlite3.connect(self.fts_path) as conn:
+            conn.executemany(
+                "INSERT INTO memory_turns_fts(turn_id, chat_id, text) VALUES (?, ?, ?)",
+                [
+                    (turn_id, chat_id, turn)
+                    for turn_id, turn in zip(ids, turns)
+                ],
+            )
+            conn.commit()
+
+        print(
+            f"{Fore.CYAN}"
+            f"[MEMORY INDEX] indexed {len(turns)} turns for chat {chat_id}"
+        )
+        return len(turns)
+
+    def _ensure_turn_index(self):
+        """Migrate legacy chat-level records the first time turn indexing is enabled."""
+        try:
+            if self.memory_turns.count() > 0:
+                return
+
+            existing = self.history.get(
+                include=["documents", "metadatas"],
+            )
+            ids = existing.get("ids") or []
+            documents = existing.get("documents") or []
+            metadatas = existing.get("metadatas") or []
+
+            if not ids:
+                return
+
+            print(
+                f"{Fore.CYAN}"
+                f"[MEMORY INDEX] migrating {len(ids)} legacy chats..."
+            )
+
+            for chat_id, document, metadata in zip(
+                ids,
+                documents,
+                metadatas,
+            ):
+                self.sync_turn_index(
+                    chat_id,
+                    document,
+                    metadata or {},
+                )
+
+            print(
+                f"{Fore.GREEN}"
+                "[MEMORY INDEX] migration complete"
+            )
+
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] migration failed: {exc}"
+            )
+
+    @staticmethod
+    def _lexical_query(query: str) -> str:
+        terms = re.findall(
+            r"[A-Za-z0-9_][A-Za-z0-9_+.#-]*",
+            query or "",
+        )
+        terms = [term for term in terms if len(term) >= 2]
+        if not terms:
+            return ""
+
+        safe_terms = [
+            term.replace('"', '')
+            for term in terms[:24]
+        ]
+        return " OR ".join(
+            f'"{term}"'
+            for term in safe_terms
+        )
+
+    def _lexical_candidates(
+        self,
+        query: str,
+        limit: int = 30,
+    ) -> list[dict]:
+        match_query = self._lexical_query(query)
+        if not match_query:
+            return []
+
+        try:
+            with sqlite3.connect(self.fts_path) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT turn_id, chat_id, text,
+                           bm25(memory_turns_fts) AS score
+                    FROM memory_turns_fts
+                    WHERE memory_turns_fts MATCH ?
+                    ORDER BY score ASC
+                    LIMIT ?
+                    """,
+                    (match_query, limit),
+                ).fetchall()
+
+            return [
+                {
+                    "turn_id": row[0],
+                    "chat_id": row[1],
+                    "text": row[2],
+                    "score": float(row[3]),
+                }
+                for row in rows
+            ]
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] lexical search failed: {exc}"
+            )
+            return []
+
+    def _hybrid_candidates(
+        self,
+        query: str,
+        vector_limit: int = 30,
+        lexical_limit: int = 30,
+        fusion_limit: int = 40,
+        exclude_chat_id: str | None = None,
+    ) -> list[dict]:
+        """Hybrid vector + lexical retrieval with Reciprocal Rank Fusion."""
+        fused = {}
+
+        try:
+            count = self.memory_turns.count()
+            if count > 0:
+                results = self.memory_turns.query(
+                    query_texts=[query],
+                    n_results=min(vector_limit, count),
+                    include=["documents", "metadatas", "distances"],
+                )
+
+                ids = (results.get("ids") or [[]])[0] or []
+                documents = (results.get("documents") or [[]])[0] or []
+                metadatas = (results.get("metadatas") or [[]])[0] or []
+
+                for rank, (turn_id, document, metadata) in enumerate(
+                    zip(ids, documents, metadatas),
+                    start=1,
+                ):
+                    metadata = metadata or {}
+                    chat_id = str(metadata.get("chat_id") or "")
+                    if exclude_chat_id and chat_id == exclude_chat_id:
+                        continue
+
+                    fused.setdefault(
+                        turn_id,
+                        {
+                            "turn_id": turn_id,
+                            "chat_id": chat_id,
+                            "text": document,
+                            "metadata": metadata,
+                            "rrf": 0.0,
+                        },
+                    )
+                    fused[turn_id]["rrf"] += 1.0 / (60.0 + rank)
+
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] vector retrieval failed: {exc}"
+            )
+
+        # Lexical retrieval is especially useful for rare identifiers,
+        # versions, filenames, model names, and technical terms.
+        for rank, item in enumerate(
+            self._lexical_candidates(query, lexical_limit),
+            start=1,
+        ):
+            chat_id = item["chat_id"]
+            if exclude_chat_id and chat_id == exclude_chat_id:
+                continue
+
+            turn_id = item["turn_id"]
+            fused.setdefault(
+                turn_id,
+                {
+                    "turn_id": turn_id,
+                    "chat_id": chat_id,
+                    "text": item["text"],
+                    "metadata": {"chat_id": chat_id},
+                    "rrf": 0.0,
+                },
+            )
+            # Slightly favor lexical matches for exact technical terms.
+            fused[turn_id]["rrf"] += 1.15 / (60.0 + rank)
+
+        return sorted(
+            fused.values(),
+            key=lambda item: item["rrf"],
+            reverse=True,
+        )[:fusion_limit]
 
     # ============================================================
     # Jina
@@ -355,7 +677,6 @@ class MemoryManager:
         doc_id = str(uuid.uuid4())
 
         metadata = dict(summary or {})
-
         metadata["pinned"] = self.normalize_pin_value(
             metadata.get("pinned", 0)
         )
@@ -364,6 +685,12 @@ class MemoryManager:
             documents=[text],
             ids=[doc_id],
             metadatas=[metadata],
+        )
+
+        self.sync_turn_index(
+            chat_id=doc_id,
+            document=text,
+            metadata=metadata,
         )
 
         return doc_id
@@ -411,6 +738,7 @@ class MemoryManager:
             self.history.delete(
                 ids=[chat_id]
             )
+            self._delete_turn_index_for_chat(chat_id)
 
             return True
 
@@ -789,312 +1117,84 @@ class MemoryManager:
     def get_raw_context(
         self,
         query: str,
-        k: int = 5,
+        k: int = 20,
         top_n: int = 8,
         max_chars: int = 12000,
         exclude_chat_id: str | None = None,
     ):
-        t0 = time.perf_counter()
+        """
+        Automatic long-term retrieval.
 
-        # ========================================================
-        # Stage 0: cheap lexical / fuzzy gate
-        # ========================================================
+        Routing is separated from retrieval quality:
+          1. RAGGate decides whether long-term memory is appropriate.
+          2. Hybrid turn-level retrieval maximizes recall.
+          3. Jina performs final precision reranking.
+          4. Only a small bounded context is returned to the main model.
+        """
+        t0 = time.perf_counter()
 
         basic = self.rag_gate.evaluate_basic(query)
 
         print(
-            f"[RAG GATE] basic: "
-            f"use_rag={basic['use_rag']} "
-            f"confidence={basic['confidence']:.3f} "
-            f"reason={basic['reason']} "
+            f"[RAG GATE] route={basic.get('route', 'none')} "
+            f"reason={basic.get('reason', '')} "
+            f"memory={basic.get('memory', 0.0):.3f} "
+            f"social={basic.get('social', 0.0):.3f} "
             f"followup={basic.get('followup', 0.0):.3f}"
         )
 
-        if basic["reason"] in {
-            "exact_conversational_anchor",
-            "fuzzy_conversational_anchor",
-        }:
-            return {
-                "history": [],
-                "profile_summary": self.get_profile_summary(
-                    include_alternatives=False
-                ),
-            }
+        empty = {
+            "history": [],
+            "profile_summary": self.get_profile_summary(
+                include_alternatives=False
+            ),
+        }
 
-        # ========================================================
-        # Stage 1: semantic intent
-        # ========================================================
+        if not basic.get("use_rag", False):
+            return empty
 
-        (
-            semantic_memory,
-            semantic_social,
-            semantic_followup,
-        ) = self._semantic_intent_scores(query)
-
-        print(
-            f"[RAG GATE] semantic: "
-            f"memory={semantic_memory:.3f} "
-            f"social={semantic_social:.3f} "
-            f"followup={semantic_followup:.3f}"
+        # --------------------------------------------------------
+        # Stage 1: broad hybrid turn retrieval
+        # --------------------------------------------------------
+        candidates = self._hybrid_candidates(
+            query=query,
+            vector_limit=max(30, k),
+            lexical_limit=30,
+            fusion_limit=50,
+            exclude_chat_id=exclude_chat_id,
         )
-
-        memory_intent = max(
-            basic.get("memory", 0.0),
-            semantic_memory,
-        )
-
-        social_intent = max(
-            basic.get("social", 0.0),
-            semantic_social,
-        )
-
-        followup_intent = max(
-            basic.get("followup", 0.0),
-            semantic_followup,
-        )
-
-        # Avoid even touching Chroma for clear social queries.
-        if (
-            social_intent >= 0.60
-            and social_intent > memory_intent + 0.10
-            and followup_intent < 0.55
-        ):
-            print(
-                "[RAG GATE] rejected: "
-                "semantic conversational intent"
-            )
-
-            return {
-                "history": [],
-                "profile_summary": self.get_profile_summary(
-                    include_alternatives=False
-                ),
-            }
-
-        # ========================================================
-        # Stage 2: cheap Chroma history retrieval
-        # ========================================================
-
-        history_docs = []
-        history_found = False
-        history_relevance = 0.0
-        history_zone = "weak"
-
-        try:
-            history_count = self.history.count()
-
-            if history_count > 0:
-                fetch_n = min(
-                    k + (3 if exclude_chat_id else 0),
-                    history_count,
-                )
-
-                results = self.history.query(
-                    query_texts=[query],
-                    n_results=fetch_n,
-                    include=[
-                        "documents",
-                        "metadatas",
-                        "distances",
-                    ],
-                )
-
-                docs = (
-                    results.get("documents") or [[]]
-                )[0] or []
-
-                ids = (
-                    results.get("ids") or [[]]
-                )[0] or []
-
-                distances = (
-                    results.get("distances") or [[]]
-                )[0] or []
-
-                print(
-                    "[RAG CHROMA]",
-                    list(zip(distances, ids)),
-                )
-
-                (
-                    history_found,
-                    history_relevance,
-                    history_zone,
-                ) = self._history_relevance_gate(distances)
-
-                for doc_id, document in zip(ids, docs):
-                    if (
-                        exclude_chat_id
-                        and doc_id == exclude_chat_id
-                    ):
-                        continue
-
-                    if document:
-                        history_docs.append(document)
-
-                    if len(history_docs) >= k:
-                        break
-
-        except Exception as e:
-            print(
-                f"{Fore.RED}"
-                f"Error fetching history: {e}"
-            )
-
-            history_found = False
-            history_relevance = 0.0
-            history_zone = "weak"
 
         t1 = time.perf_counter()
-
         print(
-            f"[TIMING] history collections "
-            f"fetching {t1 - t0:.3f}s"
+            f"[TIMING] hybrid retrieval {t1 - t0:.3f}s "
+            f"({len(candidates)} candidates)"
         )
-
-        # ========================================================
-        # Stage 3: hard Chroma gate
-        # ========================================================
-
-        if not history_found:
-            print(
-                f"{Fore.YELLOW}"
-                "[RAG GATE] rejected: "
-                "no sufficiently relevant history"
-            )
-
-            return {
-                "history": [],
-                "profile_summary": self.get_profile_summary(
-                    include_alternatives=False
-                ),
-            }
-
-        # ========================================================
-        # Stage 4: explicit-memory vs contextual-follow-up route
-        # ========================================================
-
-        margin = memory_intent - social_intent
-
-        memory_route = (
-            memory_intent >= 0.55
-            and margin >= 0.08
-            and history_zone in {"strong", "ambiguous"}
-        )
-
-        followup_route = (
-            followup_intent >= 0.55
-            and history_zone == "strong"
-            and social_intent < 0.75
-        )
-
-        ambiguous_followup_route = (
-            followup_intent >= 0.65
-            and memory_intent >= 0.40
-            and history_zone == "ambiguous"
-            and social_intent < 0.75
-        )
-
-        use_rag = (
-            memory_route
-            or followup_route
-            or ambiguous_followup_route
-        )
-
-        print(
-            f"[RAG GATE] final signals: "
-            f"memory={memory_intent:.3f}, "
-            f"social={social_intent:.3f}, "
-            f"followup={followup_intent:.3f}, "
-            f"margin={margin:.3f}, "
-            f"history={history_relevance:.3f}, "
-            f"zone={history_zone}"
-        )
-
-        routes = []
-        if memory_route:
-            routes.append("memory")
-        if followup_route:
-            routes.append("followup")
-        if ambiguous_followup_route:
-            routes.append("ambiguous_followup")
-
-        print(
-            "[RAG GATE] route: "
-            + ("+".join(routes) if routes else "none")
-        )
-
-        if not use_rag or not history_docs:
-            print(
-                f"{Fore.YELLOW}"
-                "[RAG GATE] rejected: "
-                "insufficient retrieval evidence"
-            )
-
-            return {
-                "history": [],
-                "profile_summary": self.get_profile_summary(
-                    include_alternatives=False
-                ),
-            }
-
-        # ========================================================
-        # Stage 5: extract ALL turns from selected conversations
-        # ========================================================
-
-        candidates = []
-        per_conversation_limit = 50
-
-        for document in history_docs:
-            turns = [
-                turn.strip()
-                for turn in document.split("[TURN_END]")
-                if turn.strip()
-            ]
-
-            candidates.extend(
-                turns[:per_conversation_limit]
-            )
 
         if not candidates:
-            return {
-                "history": [],
-                "profile_summary": self.get_profile_summary(
-                    include_alternatives=False
-                ),
-            }
+            return empty
 
-        t2 = time.perf_counter()
-
-        print(
-            f"[TIMING] preparing "
-            f"{len(candidates)} candidates "
-            f"{t2 - t1:.3f}s"
-        )
-
-        # ========================================================
-        # Stage 6: Jina reranking
-        # ========================================================
-
+        # --------------------------------------------------------
+        # Stage 2: Jina precision reranking
+        # --------------------------------------------------------
         relevant_turns = []
 
         try:
-            MAX_JINA_CANDIDATES = 150
+            MAX_JINA_CANDIDATES = 50
             MIN_RELEVANCE = 0.20
             RELATIVE_THRESHOLD = 0.75
 
             candidates = candidates[:MAX_JINA_CANDIDATES]
 
             rerank_documents = []
-
             for index, candidate in enumerate(candidates):
-                if len(candidate) <= 7000:
-                    excerpt = candidate
+                text = candidate["text"]
+                if len(text) <= 7000:
+                    excerpt = text
                 else:
                     excerpt = (
-                        candidate[:3500]
+                        text[:3500]
                         + "\n...[middle omitted for reranking]...\n"
-                        + candidate[-3500:]
+                        + text[-3500:]
                     )
 
                 rerank_documents.append(
@@ -1102,27 +1202,20 @@ class MemoryManager:
                 )
 
             reranker = self._get_reranker()
-
             results = reranker.rerank(
                 query,
                 rerank_documents,
-                top_n=min(8, len(rerank_documents)),
+                top_n=min(top_n, len(rerank_documents)),
             )
 
             if results:
                 top_score = float(
-                    results[0].get(
-                        "relevance_score",
-                        0.0,
-                    )
+                    results[0].get("relevance_score", 0.0)
                 )
 
                 for result in results:
                     score = float(
-                        result.get(
-                            "relevance_score",
-                            0.0,
-                        )
+                        result.get("relevance_score", 0.0)
                     )
 
                     if score < MIN_RELEVANCE:
@@ -1134,51 +1227,45 @@ class MemoryManager:
                     ):
                         break
 
-                    text = result.get(
-                        "document",
-                        "",
-                    )
-
+                    text = result.get("document", "")
                     try:
                         index = int(
                             text.split("\n", 1)[0]
                             .removeprefix("[CANDIDATE ")
                             .removesuffix("]")
                         )
-
                         relevant_turns.append(
-                            candidates[index]
+                            candidates[index]["text"]
                         )
-
                     except (ValueError, IndexError):
                         continue
 
                     if len(relevant_turns) >= top_n:
                         break
 
-        except Exception as e:
+        except Exception as exc:
             print(
                 f"{Fore.RED}"
-                f"Jina reranking failed: {e}"
+                f"Jina reranking failed: {type(exc).__name__}: {exc}"
             )
 
-        t3 = time.perf_counter()
-
+        t2 = time.perf_counter()
         print(
-            f"[TIMING] reranking "
-            f"{t3 - t2:.3f}s"
+            f"[TIMING] reranking {t2 - t1:.3f}s "
+            f"selected={len(relevant_turns)}"
         )
 
-        # ========================================================
-        # Stage 7: final context budget
-        # ========================================================
+        if not relevant_turns:
+            return empty
 
+        # --------------------------------------------------------
+        # Stage 3: final context budget
+        # --------------------------------------------------------
         selected = []
         current_chars = 0
 
         for turn in relevant_turns:
             remaining = max_chars - current_chars
-
             if remaining <= 0:
                 break
 
@@ -1193,3 +1280,49 @@ class MemoryManager:
             ),
         }
 
+    def get_memory_candidates(
+        self,
+        query: str,
+        conversation_limit: int = 5,
+        turns_per_conversation: int = 6,
+        exclude_chat_id: str | None = None,
+    ) -> list[str]:
+        """
+        Candidate generation for explicit memory_call.
+
+        Hybrid retrieval provides broad recall. Observer does final
+        semantic selection, so Jina is intentionally not used here.
+        """
+        query = (query or "").strip()
+        if not query:
+            return []
+
+        try:
+            candidates = self._hybrid_candidates(
+                query=query,
+                vector_limit=max(20, conversation_limit * turns_per_conversation),
+                lexical_limit=max(20, conversation_limit * turns_per_conversation),
+                fusion_limit=30,
+                exclude_chat_id=exclude_chat_id,
+            )
+
+            texts = [
+                item["text"]
+                for item in candidates[:30]
+            ]
+
+            print(
+                f"[MEMORY TOOL] prepared {len(texts)} hybrid candidates"
+            )
+            return texts
+
+        except Exception as exc:
+            print(
+                f"{Fore.RED}"
+                f"[MEMORY TOOL] candidate retrieval failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return []
+
+
+memory_manager = MemoryManager()
