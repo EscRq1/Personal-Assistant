@@ -281,21 +281,92 @@ class ResourceManager:
             f"{Fore.GREEN}"
             "[RESOURCE MANAGER] Jina released"
         )
+    def _allocate_assistant(self):
+        # If Assistant already exists, simply adopt it.
+        if self._is_loaded(self.assistant_model):
+            self.current_owner = GPUResource.ASSISTANT
+            print(
+                f"{Fore.GREEN}"
+                "[RESOURCE MANAGER] assistant already loaded"
+            )
+            return
+
+        # Router state is authoritative if Python state is stale.
+        if self._is_loaded(self.observer_model):
+            self._unload_llama_model(self.observer_model)
+
+        self._load_llama_model(self.assistant_model)
+        self.current_owner = GPUResource.ASSISTANT
+
+    def _allocate_observer(self):
+        # If Observer already exists, simply adopt it.
+        if self._is_loaded(self.observer_model):
+            self.current_owner = GPUResource.OBSERVER
+            print(
+                f"{Fore.GREEN}"
+                "[RESOURCE MANAGER] observer already loaded"
+            )
+            return
+
+        # Router state is authoritative if Python state is stale.
+        if self._is_loaded(self.assistant_model):
+            self._unload_llama_model(self.assistant_model)
+
+        self._load_llama_model(self.observer_model)
+        self.current_owner = GPUResource.OBSERVER
+
+    def _allocate_jina(self):
+        jina = self._create_jina()
+        self.current_owner = GPUResource.JINA
+        return jina
+
+    def _release_current(self):
+        if self.current_owner in (
+            GPUResource.ASSISTANT,
+            GPUResource.OBSERVER,
+        ):
+            self._release_llama_models()
+
+        elif self.current_owner == GPUResource.JINA:
+            self._release_jina()
+
+        self.current_owner = GPUResource.NONE
+
+    def reconcile(self):
+        """
+        Synchronize Python-side ownership with the llama.cpp router.
+
+        Call once after the router is ready and before serving requests.
+        """
+        with self.lock:
+            assistant_loaded = self._is_loaded(self.assistant_model)
+            observer_loaded = self._is_loaded(self.observer_model)
+
+            if assistant_loaded and observer_loaded:
+                raise RuntimeError(
+                    "Invalid router state: both assistant and observer are loaded"
+                )
+
+            if assistant_loaded:
+                self.current_owner = GPUResource.ASSISTANT
+            elif observer_loaded:
+                self.current_owner = GPUResource.OBSERVER
+            elif self._jina is not None:
+                self.current_owner = GPUResource.JINA
+            else:
+                self.current_owner = GPUResource.NONE
+
+            print(
+                f"{Fore.CYAN}"
+                f"[RESOURCE MANAGER] reconciled owner: "
+                f"{self.current_owner.value}"
+            )
 
     # ============================================================
     # Resource switching
     # ============================================================
 
     def acquire(self, resource: GPUResource | str):
-        """
-        Acquire exclusive GPU ownership.
-
-        Supported resources:
-            GPUResource.ASSISTANT
-            GPUResource.OBSERVER
-            GPUResource.JINA
-        """
-
         if isinstance(resource, str):
             try:
                 resource = GPUResource(resource.lower())
@@ -307,86 +378,25 @@ class ResourceManager:
         with self.lock:
             # Fast path.
             if self.current_owner == resource:
-                return self._get_current_resource(resource)
+                return
 
-            print(
-                f"{Fore.CYAN}"
-                f"[RESOURCE MANAGER] switching "
-                f"{self.current_owner.value} -> {resource.value}"
-            )
-
-            # ----------------------------------------------------
-            # Release current owner
-            # ----------------------------------------------------
-
-            if self.current_owner in (
-                GPUResource.ASSISTANT,
-                GPUResource.OBSERVER,
-            ):
-                self._release_llama_models()
-
-            elif self.current_owner == GPUResource.JINA:
-                self._release_jina()
-
-            # ----------------------------------------------------
-            # Defensive cleanup
-            #
-            # Don't trust our bookkeeping completely. Make sure
-            # nothing from another owner remains.
-            # ----------------------------------------------------
+            self._release_current()
 
             if resource == GPUResource.ASSISTANT:
-                self._release_jina()
-                self._release_llama_models()
-
-                self._load_llama_model(self.assistant_model)
-                self.current_owner = GPUResource.ASSISTANT
-
-                return None
+                return self._allocate_assistant()
 
             if resource == GPUResource.OBSERVER:
-                self._release_jina()
-                self._release_llama_models()
-
-                self._load_llama_model(self.observer_model)
-                self.current_owner = GPUResource.OBSERVER
-
-                return None
+                return self._allocate_observer()
 
             if resource == GPUResource.JINA:
-                self._release_llama_models()
-
-                jina = self._create_jina()
-                self.current_owner = GPUResource.JINA
-
-                return jina
+                return self._allocate_jina()
 
             if resource == GPUResource.NONE:
-                self._release_llama_models()
-                self._release_jina()
-
-                self.current_owner = GPUResource.NONE
                 return None
 
             raise RuntimeError(
-                f"Unhandled GPU resource: {resource}"
+                f"Unhandled resource: {resource}"
             )
-
-    def release(self) -> None:
-        """
-        Release all GPU-owned resources.
-        """
-
-        with self.lock:
-            print(
-                f"{Fore.CYAN}"
-                "[RESOURCE MANAGER] releasing all GPU resources"
-            )
-
-            self._release_llama_models()
-            self._release_jina()
-
-            self.current_owner = GPUResource.NONE
 
     def get_jina(self):
         """
@@ -446,3 +456,4 @@ class ResourceManager:
 
 
 resource_manager = ResourceManager()
+

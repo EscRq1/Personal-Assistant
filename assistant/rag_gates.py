@@ -3,53 +3,19 @@ from rapidfuzz import fuzz
 
 
 CONVERSATIONAL_ANCHORS = {
-    "hi",
-    "hello",
-    "hey",
-    "hey there",
-    "yo",
-    "hiya",
-    "morning",
-    "good morning",
-    "good afternoon",
-    "good evening",
-    "good night",
-    "how are you",
-    "how is it going",
-    "how's it going",
-    "what's up",
-    "whats up",
-
-    "thanks",
-    "thank you",
-    "thx",
-    "ty",
-    "you're welcome",
-    "you are welcome",
-
-    "ok",
-    "okay",
-    "got it",
-    "gotcha",
-    "sure",
-    "yeah",
-    "yep",
-    "yes",
-    "no",
-    "nope",
-    "cool",
-    "nice",
-    "great",
-    "awesome",
-
-    "bye",
-    "goodbye",
-    "see you",
-    "see ya",
+    "hi", "hello", "hey", "hey there", "yo", "hiya",
+    "morning", "good morning", "good afternoon",
+    "good evening", "good night",
+    "how are you", "how is it going", "how's it going",
+    "what's up", "whats up",
+    "thanks", "thank you", "thx", "ty",
+    "you're welcome", "you are welcome",
+    "ok", "okay", "got it", "gotcha", "sure", "yeah", "yep",
+    "yes", "no", "nope", "cool", "nice", "great", "awesome",
+    "bye", "goodbye", "see you", "see ya",
 }
 
-# Strong indications that the user is asking about something
-# from previous conversation(s).
+
 MEMORY_ANCHORS = (
     "remember",
     "do you remember",
@@ -61,8 +27,14 @@ MEMORY_ANCHORS = (
     "where did i",
     "i told you",
     "i mentioned",
+    "you mentioned",
     "we discussed",
     "we talked about",
+    "we've discussed",
+    "we've talked about",
+    "we went over",
+    "we covered",
+    "had a conversation about",
     "continue from",
     "continue where",
     "last time",
@@ -78,6 +50,7 @@ MEMORY_ANCHORS = (
     "that thing",
 )
 
+
 TEMPORAL_ANCHORS = (
     "yesterday",
     "today",
@@ -90,6 +63,7 @@ TEMPORAL_ANCHORS = (
     "recently",
 )
 
+
 PERSONAL_ANCHORS = (
     "my ",
     "i'm ",
@@ -100,6 +74,7 @@ PERSONAL_ANCHORS = (
     "i want ",
     "i need ",
 )
+
 
 GENERAL_KNOWLEDGE_ANCHORS = (
     "what is ",
@@ -115,6 +90,30 @@ GENERAL_KNOWLEDGE_ANCHORS = (
 )
 
 
+CONTEXTUAL_FOLLOWUP_ANCHORS = (
+    "what about",
+    "how about",
+    "and what about",
+    "and how about",
+    "what then",
+    "then what",
+    "what happens then",
+    "and then",
+    "what about that",
+    "what about the other",
+    "what about the second",
+    "what about the first",
+    "what about this",
+    "what about that one",
+    "how does that work",
+    "how would that work",
+    "and this",
+    "and that",
+    "what if instead",
+    "what about the alternative",
+)
+
+
 def normalize_query(text: str) -> str:
     text = (text or "").lower().strip()
     text = re.sub(r"[^\w\s']", " ", text)
@@ -124,27 +123,54 @@ def normalize_query(text: str) -> str:
 
 class RAGGate:
     """
-    Cheap CPU-side decision layer.
+    Cheap CPU-side intent classifier.
 
-    It intentionally does NOT try to determine whether useful memory
-    definitely exists. It only estimates whether paying the cost of
-    semantic memory retrieval + Jina is justified.
+    It does not decide whether useful history exists. Chroma does that.
+    It estimates whether a query is conversational, explicit-memory,
+    contextual-followup, or ambiguous.
     """
 
     def __init__(self):
         self._social_anchors = tuple(
             normalize_query(x) for x in CONVERSATIONAL_ANCHORS
         )
+        self._followup_anchors = tuple(
+            normalize_query(x) for x in CONTEXTUAL_FOLLOWUP_ANCHORS
+        )
 
     def _fuzzy_social_score(self, query: str) -> float:
         if not query:
             return 1.0
 
+        return max(
+            fuzz.ratio(query, anchor) / 100.0
+            for anchor in self._social_anchors
+        )
+
+    def _contextual_followup_score(self, query: str) -> float:
+        if not query:
+            return 0.0
+
+        words = query.split()
+        if len(words) < 3:
+            return 0.0
+
         best = 0.0
 
-        for anchor in self._social_anchors:
-            score = fuzz.ratio(query, anchor) / 100.0
-            best = max(best, score)
+        for anchor in self._followup_anchors:
+            # Strongest signal: query literally starts with the anchor.
+            if query.startswith(anchor):
+                best = max(best, 1.0)
+                continue
+
+            # For longer queries, partial matching handles prefixes such as
+            # "ok then what about ..." without making "hi there" a follow-up.
+            if len(words) >= 4:
+                score = fuzz.partial_ratio(
+                    query,
+                    anchor,
+                ) / 100.0
+                best = max(best, score)
 
         return best
 
@@ -177,43 +203,46 @@ class RAGGate:
                 "confidence": 0.0,
                 "reason": "empty_query",
                 "query": query,
+                "memory": 0.0,
+                "social": 0.0,
+                "followup": 0.0,
             }
 
         words = query.split()
 
-        # Exact social utterance.
         if query in self._social_anchors:
             return {
                 "use_rag": False,
                 "confidence": 0.0,
                 "reason": "exact_conversational_anchor",
                 "query": query,
+                "memory": 0.0,
+                "social": 1.0,
+                "followup": 0.0,
             }
 
         fuzzy_social = self._fuzzy_social_score(query)
 
-        # Very short fuzzy matches are strong evidence of casual
-        # conversation and shouldn't wake Jina.
         if len(words) <= 4 and fuzzy_social >= 0.84:
             return {
                 "use_rag": False,
                 "confidence": 0.02,
                 "reason": "fuzzy_conversational_anchor",
                 "query": query,
+                "memory": 0.0,
                 "social": fuzzy_social,
+                "followup": 0.0,
             }
 
         memory = self._explicit_memory_score(query)
+        followup = self._contextual_followup_score(query)
         penalty = self._general_knowledge_penalty(query)
 
         confidence = memory - penalty
 
-        # Longer queries are less likely to be a simple greeting.
         if len(words) >= 8:
             confidence += 0.05
 
-        # A social-looking query gets a modest penalty,
-        # but does not automatically kill RAG.
         if fuzzy_social >= 0.75:
             confidence -= 0.15
 
@@ -226,77 +255,6 @@ class RAGGate:
             "query": query,
             "memory": memory,
             "social": fuzzy_social,
+            "followup": followup,
         }
 
-    def combine(
-        self,
-        basic: dict,
-        semantic_memory: float,
-        semantic_social: float,
-        history_relevance: float,
-    ) -> dict:
-        query = basic["query"]
-
-        memory_intent = max(
-            basic.get("memory", 0.0),
-            semantic_memory,
-        )
-
-        social_intent = max(
-            basic.get("social", 0.0),
-            semantic_social,
-        )
-
-        margin = max(-1.0, min(
-            memory_intent - social_intent,
-            1.0,
-        ))
-
-        # The three signals have different jobs:
-        #
-        # memory_intent:
-        #   does the query sound like a request for past context?
-        #
-        # margin:
-        #   does it sound more like memory retrieval than conversation?
-        #
-        # history_relevance:
-        #   does Chroma actually have something resembling the query?
-        #
-        confidence = (
-            0.45 * memory_intent
-            + 0.20 * max(margin, 0.0)
-            + 0.35 * history_relevance
-        )
-
-        confidence = max(0.0, min(confidence, 1.0))
-
-        # Require independent evidence.
-        #
-        # This is intentionally conservative:
-        # semantic intent alone isn't enough.
-        use_rag = (
-            memory_intent >= 0.45
-            and margin >= 0.08
-            and history_relevance >= 0.12
-            and confidence >= 0.40
-        )
-
-        reason = (
-            f"memory={memory_intent:.3f}, "
-            f"social={social_intent:.3f}, "
-            f"margin={margin:.3f}, "
-            f"history={history_relevance:.3f}, "
-            f"confidence={confidence:.3f}"
-        )
-
-        return {
-            "use_rag": use_rag,
-            "confidence": confidence,
-            "reason": reason,
-            "query": query,
-            "memory_intent": memory_intent,
-            "social_intent": social_intent,
-            "intent_margin": margin,
-            "history_relevance": history_relevance,
-        }

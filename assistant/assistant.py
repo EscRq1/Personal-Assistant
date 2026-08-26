@@ -68,16 +68,17 @@ class Controller:
 
             messages = []
 
-            messages.append({
-                "role": "user",
-                "content": prompt,
-            })
-
+            
             if system_prompt:
                 messages.append({
                     "role": "system",
                     "content": system_prompt,
                 })
+
+            messages.append({
+                "role": "user",
+                "content": prompt,
+            })
 
 
             payload = {
@@ -187,9 +188,6 @@ class Controller:
                 "cache_prompt": True,
             }
 
-            print("\n========== OBSERVER REQUEST ==========")
-            print(json.dumps(payload, indent=2)[:5000])
-            print("======================================\n")
             print(
                 f"{Fore.CYAN}"
                 f"MODEL USED: Observer"
@@ -210,17 +208,8 @@ class Controller:
             content = message.get("content") or ""
             reasoning = message.get("reasoning_content") or ""
 
-            print("\n========== OBSERVER RESPONSE ==========")
-            print("CONTENT:")
-            print(content)
-            print("\nREASONING:")
-            print(reasoning)
-            print("=======================================\n")
 
             if content.strip():
-                print("\n========== OBSERVER RAW_DESC ==========")
-                print(repr(content))
-                print("========================================\n")
                 return content
 
             if reasoning.strip():
@@ -356,9 +345,7 @@ class Controller:
                 system_prompt=VISION_INSTRUCTIONS,
                 images_b64=images_b64
             )
-            print("\n========== RAW_DESC AFTER callObserver ==========")
-            print(repr(raw_desc))
-            print("=================================================\n")
+
             images_desc = self.parse_vision_output(raw_desc)
 
         
@@ -384,9 +371,6 @@ class Controller:
 
         if model == "Assistant":
 
-            print("\n========== FINAL ASSISTANT PROMPT ==========")
-            print(final_prompt)
-            print("=============================================\n")
             return self.callAssistant(
                 prompt=final_prompt,
                 target_temp=self.temp,
