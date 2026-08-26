@@ -68,22 +68,19 @@ TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "vision_call",
-            "description": (
-                "Ask the Observer to inspect a user-provided image and "
-                "return the relevant visual information."
-            ),
+            "name": "callCoder",
+            "description": "Transfer control to coding mode...",
             "parameters": {
-                "type": "object",
-                "properties": {
-                    "instruction": {
-                        "type": "string",
-                        "description": (
-                            "What visual information should be extracted."
-                        )
-                    }
+            "type": "object",
+            "properties": {
+                "task": {
+                "type": "string"
                 },
-                "required": ["instruction"]
+                "context": {
+                "type": "string"
+                }
+            },
+            "required": ["task", "context"]
             }
         }
     },
@@ -108,9 +105,16 @@ TOOLS = [
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}
 
+CONTROL_TOOLS = {
+    "callCoder",
+}
 
 def register_tool(name: str, function: Callable[..., Any]) -> None:
     TOOL_FUNCTIONS[name] = function
+
+
+def register_control_tool(name: str) -> None:
+    CONTROL_TOOLS.add(name)
 
 
 def get_tool(name: str) -> Callable[..., Any] | None:
@@ -126,5 +130,6 @@ def get_registered_tools() -> list[dict]:
         tool
         for tool in TOOLS
         if tool["function"]["name"] in TOOL_FUNCTIONS
+        or tool["function"]["name"] in CONTROL_TOOLS
     ]
 
