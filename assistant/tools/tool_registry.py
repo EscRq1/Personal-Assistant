@@ -143,8 +143,54 @@ TOOLS = [
             }
         }
     },
-]
+    {
+        "type": "function",
+        "function": {
+            "name": "write_notebook",
+            "description": (
+                "Update the assistant's persistent global notebook. "
+                "The notebook is a small, long-term memory maintained by the "
+                "assistant itself for information that may remain useful across "
+                "future conversations.\n\n"
 
+                "Provide the COMPLETE replacement contents of the notebook, "
+                "not an individual note or an append operation. "
+                "The previous notebook contents will be replaced entirely.\n\n"
+
+                "Only store information that is likely to remain useful across "
+                "future conversations. Do not store temporary reasoning, "
+                "speculation, unsupported assumptions, transient task details, "
+                "or information that is already adequately represented by "
+                "user_profile or conversational memory.\n\n"
+
+                "Keep the notebook concise and information-dense. "
+                "Prefer stable facts, important project context, architectural "
+                "decisions, persistent preferences, recurring constraints, and "
+                "other information that would materially improve future responses.\n\n"
+
+                "HARD LIMIT: The complete notebook MUST NOT exceed 2048 tokens. "
+                "If the existing notebook is already near the limit, rewrite it "
+                "by removing outdated or lower-value information rather than "
+                "adding more content. Never intentionally exceed this limit."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "notes": {
+                        "type": "string",
+                        "description": (
+                            "The complete replacement contents of the persistent "
+                            "assistant notebook. Keep it concise, information-dense, "
+                            "and strictly within the 2048-token hard limit."
+                        )
+                    }
+                },
+                "required": ["notes"],
+                "additionalProperties": False
+            }
+        }
+    }
+]
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}
 

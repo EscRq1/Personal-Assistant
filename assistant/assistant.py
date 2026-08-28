@@ -65,6 +65,12 @@ class Controller:
                 self.memory_call,
             )
 
+            register_tool(
+                "write_notebook",
+                self.memmgr.write_to_notebook,
+            )
+        
+
         register_control_tool("high_thinking")
         register_control_tool("xhigh_thinking")
 
