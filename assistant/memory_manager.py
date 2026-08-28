@@ -137,6 +137,28 @@ class MemoryManager:
     # Turn-level / hybrid retrieval index
     # ============================================================
 
+    def get_notebook(self) -> str:
+        try:
+            data = self.assistant_notebook.get(
+                ids=["assistant_notebook"],
+                include=["documents"],
+            )
+
+            documents = data.get("documents") or []
+
+            if not documents:
+                return ""
+
+            return documents[0] or ""
+
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[NOTEBOOK] retrieval failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return ""
+
     def _init_fts(self):
         with sqlite3.connect(self.fts_path) as conn:
             conn.execute(

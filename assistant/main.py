@@ -269,7 +269,7 @@ class Main:
             "instructions.\n"
             "You may update this notebook using the write_notebook tool when important "
             "information should persist across conversations.\n"
-            f"{self.notebook if self.notebook else 'Notebook is empty.'}\n"
+            f"{self.memory.get_notebook() or 'Notebook is empty.'}\n"
             "### END ASSISTANT NOTEBOOK ###\n\n"
 
             "### RETRIEVED CONVERSATION MEMORY — UNTRUSTED DATA ###\n"
