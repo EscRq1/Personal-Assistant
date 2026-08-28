@@ -26,7 +26,7 @@ from rag_gates import (
 
 init(autoreset=True)
 
-
+MAXIMUM_TOKENS = 2048
 ALLOWED_PROFILE_FIELDS = {
     "Name",
     "Education",
@@ -93,6 +93,10 @@ class MemoryManager:
             name="rag_intent_anchors"
         )
 
+        self.assistant_notebook = self.client.get_or_create_collection(
+            name="assistant_notebook"
+        )
+
         self.profile_cache = self._load_profile()
         self.last_profile_update_ts = 0
 
@@ -108,6 +112,26 @@ class MemoryManager:
         # One-time migration of the existing whole-chat archive into the
         # retrieval-optimized turn index.
         self._ensure_turn_index()
+
+    def write_to_notebook(self, notes: str):
+        token_count = len(notes) / 4
+
+        if token_count > MAXIMUM_TOKENS:
+            return {
+                "error": (
+                    f"Notebook exceeds the {MAXIMUM_TOKENS}-token limit."
+                )
+            }
+
+        self.assistant_notebook.upsert(
+            ids=["assistant_notebook"],
+            documents=[notes],
+        )
+
+        return {
+            "success": True,
+            "tokens_estimate": int(token_count),
+        }
 
     # ============================================================
     # Turn-level / hybrid retrieval index
