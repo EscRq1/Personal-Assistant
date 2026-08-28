@@ -337,6 +337,7 @@ class Controller:
                     context=context,
                     messages=messages,
                     mode = mode,
+                    websearch=web_enabled
                 ):
                     yield token
 
@@ -426,28 +427,161 @@ class Controller:
             "\n\n[Agent] Maximum tool-call iterations reached."
         )
 
+    
+    def build_coding_context(
+        self,
+        mode: str,
+        tools: list[dict],
+    ) -> str:
+
+        tool_names = [
+            tool["function"]["name"]
+            for tool in tools
+        ]
+
+        if mode == "high":
+            escalation = (
+                "You may escalate to xhigh_thinking when "
+                "high-level reasoning is genuinely insufficient."
+            )
+        else:
+            escalation = (
+                "You are the deepest reasoning tier. "
+                "You cannot escalate further."
+            )
+
+        return f"""
+                === EXECUTION CONTEXT ===
+
+                You are operating as the {mode.upper()} reasoning tier.
+
+                You are NOT the primary conversational assistant.
+                You are solving a task delegated by the parent assistant.
+
+                Main tier: assistant (medium)
+                Current tier: {mode}
+                Return target: assistant (medium)
+
+                === AVAILABLE TOOLS ===
+
+                {chr(10).join(f"- {name}" for name in tool_names)}
+
+                This list is authoritative for this invocation.
+                Do not assume tools exist because they were available
+                in another invocation.
+
+                === ESCALATION ===
+
+                {escalation}
+
+                === OUTPUT ===
+
+                Your output is an internal result for the parent tier.
+                The parent assistant is responsible for presenting the
+                final response to the user.
+
+                Do not claim that you directly interacted with the user.
+                Do not invent capabilities that are not present.
+
+                === END EXECUTION CONTEXT ===
+                """.strip()
+    
     def callCoder(
         self,
         task: str,
         context: str,
         messages: list[dict],
         mode: str,
+        websearch: bool,
     ):
+        """
+        Run one reasoning-tier invocation.
+
+        `messages` is a snapshot of the parent tier's conversation.
+        The child receives that context but owns its own copy from this point onward.
+
+        Flow:
+
+            assistant
+                ↓
+            high
+                ↓
+            xhigh
+                ↓
+            return
+
+        The child streams its output directly to the UI.
+        """
+
+        # ------------------------------------------------------------
+        # Create an independent conversation for this reasoning tier.
+        # ------------------------------------------------------------
+
         messages = list(messages)
+
+        # ------------------------------------------------------------
+        # Determine the tools actually available to THIS tier.
+        # ------------------------------------------------------------
+
+        tools = self.tool_controller.get_coding_tools(
+            mode=mode,
+            web_enabled=websearch,
+        )
+
+        # ------------------------------------------------------------
+        # Add explicit delegation context.
+        #
+        # This is NOT another copy of memory.
+        # The inherited system/user/context messages are already
+        # present in `messages`.
+        # ------------------------------------------------------------
 
         messages.append({
             "role": "user",
-            "content": (
-                "Enter coding mode now.\n\n"
-                f"TASK:\n{task}\n\n"
-                f"CONTEXT:\n{context}"
-            ),
+            "content": self.build_coding_context(
+                mode=mode,
+                tools=tools,
+            )
+            + "\n\n"
+            + "=== DELEGATED TASK ===\n"
+            + task
+            + "\n\n"
+            + "=== ADDITIONAL CONTEXT ===\n"
+            + (context or "(none provided)"),
         })
+
+        # ------------------------------------------------------------
+        # Reasoning/tool loop.
+        # ------------------------------------------------------------
 
         for iteration in range(MAX_ITERATIONS):
 
             content_parts = []
             accumulated_tools = {}
+
+            tools = self.tool_controller.get_coding_tools(
+                mode=mode,
+                web_enabled=websearch,
+            )
+
+            print(
+                f"{Fore.CYAN}"
+                f"[CODER] mode={mode} tools="
+                + ", ".join(
+                    tool["function"]["name"]
+                    for tool in tools
+                )
+            )
+
+            print(
+                f"{Fore.CYAN}"
+                f"[CODER] generation phase "
+                f"{iteration + 1}/{MAX_ITERATIONS}"
+            )
+
+            # --------------------------------------------------------
+            # Model inference.
+            # --------------------------------------------------------
 
             with self.resources.lock:
 
@@ -456,8 +590,10 @@ class Controller:
                 payload = {
                     "model": self.assistant_model,
                     "messages": messages,
+
                     "temperature": 0.2,
                     "max_tokens": 8192,
+
                     "stream": True,
                     "cache_prompt": True,
 
@@ -465,21 +601,12 @@ class Controller:
                         "reasoning_effort": mode,
                     },
 
-                    "tools": self.tool_controller.get_coding_tools(
-                        web_enabled=True,
-                        mode = mode
-                    ),
-
+                    "tools": tools,
                     "tool_choice": "auto",
+
                     "parse_tool_calls": True,
                     "parallel_tool_calls": False,
                 }
-
-                print(
-                    f"{Fore.CYAN}"
-                    f"[CODER] generation phase "
-                    f"{iteration + 1}/{MAX_ITERATIONS}"
-                )
 
                 with requests.post(
                     self.chat_endpoint,
@@ -512,11 +639,21 @@ class Controller:
                             or {}
                         )
 
+                        # ------------------------------------------------
+                        # Normal generated content.
+                        # ------------------------------------------------
+
                         token = delta.get("content")
 
                         if token:
                             content_parts.append(token)
+
+                            # Keep streaming directly to the UI.
                             yield token
+
+                        # ------------------------------------------------
+                        # Tool-call fragments.
+                        # ------------------------------------------------
 
                         tool_deltas = delta.get("tool_calls")
 
@@ -526,22 +663,34 @@ class Controller:
                                 tool_deltas,
                             )
 
+            # --------------------------------------------------------
+            # Generation finished.
+            # --------------------------------------------------------
+
             tool_calls = (
                 self.tool_controller.finalize_tool_calls(
                     accumulated_tools
                 )
             )
 
+            # --------------------------------------------------------
+            # Check whether this tier wants to escalate.
+            # --------------------------------------------------------
+
             thinking_calls = [
                 call
                 for call in tool_calls
                 if (
                     (call.get("function") or {}).get("name")
-                    in {"high_thinking", "xhigh_thinking"}
+                    in {
+                        "high_thinking",
+                        "xhigh_thinking",
+                    }
                 )
             ]
 
             if thinking_calls:
+
                 thinking_call = thinking_calls[0]
 
                 function = thinking_call.get("function") or {}
@@ -551,57 +700,136 @@ class Controller:
                     arguments = json.loads(
                         function.get("arguments", "{}")
                     )
+
                 except json.JSONDecodeError as exc:
-                    yield f"\n\n[Coder] Invalid escalation arguments: {exc}"
+
+                    yield (
+                        f"\n\n[Coder] Invalid escalation "
+                        f"arguments: {exc}"
+                    )
                     return
 
-                task = arguments.get("task", "").strip()
-                context = arguments.get("context", "").strip()
+                next_task = arguments.get(
+                    "task",
+                    "",
+                ).strip()
 
-                if not task:
+                next_context = arguments.get(
+                    "context",
+                    "",
+                ).strip()
+
+                reason = arguments.get(
+                    "reason",
+                    "",
+                ).strip()
+
+                if not next_task:
                     yield "\n\n[Coder] Missing escalation task."
                     return
 
-                if tool_name != "xhigh_thinking":
-                    yield "\n\n[Coder] Invalid escalation tool."
+                # ----------------------------------------------------
+                # HIGH → XHIGH is the only valid child escalation.
+                # XHIGH cannot escalate further.
+                # ----------------------------------------------------
+
+                if mode == "high":
+
+                    if tool_name != "xhigh_thinking":
+                        yield (
+                            "\n\n[Coder] Invalid escalation: "
+                            "high may only escalate to xhigh."
+                        )
+                        return
+
+                    print(
+                        f"{Fore.YELLOW}"
+                        "[CODER] escalating high -> xhigh"
+                    )
+
+                    # ------------------------------------------------
+                    # IMPORTANT:
+                    #
+                    # Preserve HIGH's current assistant message
+                    # BEFORE creating the XHIGH child.
+                    #
+                    # This gives XHIGH:
+                    #   - inherited parent context
+                    #   - HIGH's delegated task
+                    #   - HIGH's tool calls
+                    #   - HIGH's preceding output
+                    #   - HIGH's tool results
+                    # ------------------------------------------------
+
+                    assistant_content = "".join(
+                        content_parts
+                    )
+
+                    messages.append(
+                        self.tool_controller
+                        .build_assistant_tool_message(
+                            content=assistant_content,
+                            tool_calls=tool_calls,
+                        )
+                    )
+
+                    escalation_context = (
+                        f"{next_context}\n\n"
+                        f"=== HIGH ESCALATION ===\n"
+                        f"HIGH determined that its current reasoning "
+                        f"was insufficient.\n\n"
+                        f"REASON:\n{reason}"
+                    )
+
+                    # ------------------------------------------------
+                    # Recurse into XHIGH.
+                    #
+                    # `messages` is copied again inside callCoder(),
+                    # so XHIGH gets its own independent history.
+                    # ------------------------------------------------
+
+                    for token in self.callCoder(
+                        task=next_task,
+                        context=escalation_context,
+                        messages=messages,
+                        mode="xhigh",
+                        websearch=websearch,
+                    ):
+                        yield token
+
                     return
 
-                reason = arguments.get("reason", "").strip()
+                # ----------------------------------------------------
+                # XHIGH cannot escalate.
+                # ----------------------------------------------------
 
-                print(
-                    f"{Fore.YELLOW}"
-                    "[CODER] escalating high -> xhigh"
-                )
+                else:
 
-                escalation_context = (
-                    f"{context}\n\n"
-                    f"WHY HIGH WAS INSUFFICIENT:\n{reason}"
-                )
+                    yield (
+                        "\n\n[Coder] XHIGH cannot escalate "
+                        "to another reasoning tier."
+                    )
+                    return
 
-                for token in self.callCoder(
-                    task=task,
-                    context=escalation_context,
-                    messages=messages,
-                    mode="xhigh",
-                ):
-                    yield token
-
-                return
-
-            # ----------------------------------------------------
-            # No more tools -> coding answer is finished.
-            # ----------------------------------------------------
+            # --------------------------------------------------------
+            # No escalation.
+            # --------------------------------------------------------
 
             if not tool_calls:
+
                 print(
                     f"{Fore.GREEN}"
-                    "[CODER] final answer"
+                    f"[CODER] final answer"
                 )
+
                 return
 
-            # ----------------------------------------------------
-            # Coding mode may use normal instruments.
-            # ----------------------------------------------------
+            # --------------------------------------------------------
+            # Normal tools.
+            #
+            # Preserve the assistant's tool request, execute tools,
+            # then append their results to THIS tier's conversation.
+            # --------------------------------------------------------
 
             self.tool_controller.print_tool_batch(
                 tool_calls
@@ -629,6 +857,7 @@ class Controller:
             )
 
             for result in results:
+
                 messages.append(
                     self.tool_controller.build_tool_message(
                         result
