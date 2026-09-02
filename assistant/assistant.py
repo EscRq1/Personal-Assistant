@@ -592,7 +592,6 @@ class Controller:
                     "messages": messages,
 
                     "temperature": 0.2,
-                    "max_tokens": 8192,
 
                     "stream": True,
                     "cache_prompt": True,
@@ -600,6 +599,7 @@ class Controller:
                     "chat_template_kwargs": {
                         "reasoning_effort": mode,
                     },
+                    "frequency_penalty": 0.3,
 
                     "tools": tools,
                     "tool_choice": "auto",
@@ -948,14 +948,11 @@ class Controller:
             message = data["choices"][0]["message"]
 
             content = message.get("content") or ""
-            reasoning = message.get("reasoning_content") or ""
 
 
             if content.strip():
                 return content
 
-            if reasoning.strip():
-                return reasoning
 
             return ""
 
@@ -1019,18 +1016,16 @@ class Controller:
                 "=== CODE / PROGRAMMING ===",
                 "Prioritize programming information over visual appearance.",
                 "Identify the programming language when possible.",
-                "Transcribe relevant visible code, commands, filenames, paths, functions, variables, errors, warnings, and compiler output.",
-                "Preserve important code structure.",
+                "Transcribe the code literally, word-by-word and line-by-line, including all visible commands, filenames, paths, functions, variables, errors, warnings, and compiler output.",
+                "Preserve exact code structure and syntax.",
                 "Do not rewrite, optimize, or correct the code.",
                 "If text is unclear, explicitly indicate the uncertainty instead of guessing.",
-                "Do not transcribe irrelevant or repeated code.",
 
                 "=== DOCUMENT / TEXT ===",
                 "Prioritize information-bearing text.",
-                "Extract relevant titles, headings, paragraphs, lists, tables, dates, numbers, labels, and values.",
+                "When a lot of text is present, transcribe all text literally, word-by-word.",
+                "Extract all relevant titles, headings, paragraphs, lists, tables, dates, numbers, labels, and values without summarizing or omitting content.",
                 "Preserve document structure when useful.",
-                "Transcribe important text accurately.",
-                "Do not reproduce large amounts of text when a concise extraction preserves the relevant information.",
                 "If important text is unreadable, explicitly state that.",
 
                 "=== SCREENSHOT / SOFTWARE INTERFACE ===",
@@ -1112,6 +1107,7 @@ class Controller:
                 f"=== USER-PROVIDED IMAGES ===\n"
                 f"{vision_context}"
             )
+            print(final_prompt)
         else:
             final_prompt = prompt
 
@@ -1293,7 +1289,7 @@ class Controller:
                 "Select relevant historical memory entries. "
                 "Return only valid JSON."
             ),
-            max_tokens=1024
+            max_tokens=1024,
         )
 
         # ========================================================

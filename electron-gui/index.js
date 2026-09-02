@@ -463,110 +463,25 @@ async function loadChat(chatId) {
 
         const data = await response.json();
 
-        if (!data || typeof data.content !== "string") {
-            throw new Error("Invalid chat content received");
+        if (!data || !Array.isArray(data.messages)) {
+            throw new Error("Invalid chat messages received");
         }
 
-        /*
-         * IMPORTANT:
-         *
-         * Do NOT use:
-         *
-         *     line.split(" | ")
-         *
-         * because " | " is valid Markdown table syntax.
-         *
-         * [TURN_END] is our actual turn delimiter, so we only
-         * parse the User/Assistant boundary inside each turn.
-         */
-
-        const interactions = data.content.split("[TURN_END]");
-
-        for (const rawTurn of interactions) {
-            const turn = rawTurn.trim();
-
-            if (!turn) {
+        for (const message of data.messages) {
+            if (!message || !["user", "assistant"].includes(message.role)) {
                 continue;
             }
 
-            /*
-             * A stored turn is expected to look approximately like:
-             *
-             * User: <user message> | Assistant: <assistant message>
-             *
-             * We split ONLY at the first " | Assistant:" marker.
-             *
-             * Everything after that belongs to the assistant,
-             * including Markdown tables containing " | ".
-             */
-
-            const assistantMarker = " | Assistant:";
-
-            const assistantIndex = turn.indexOf(
-                assistantMarker
-            );
-
-            if (assistantIndex !== -1) {
-                const userPart = turn
-                    .slice(0, assistantIndex)
-                    .trim();
-
-                const assistantPart = turn
-                    .slice(
-                        assistantIndex + assistantMarker.length
-                    )
-                    .trim();
-
-                if (userPart.startsWith("User:")) {
-                    appendMessage(
-                        outputDiv,
-                        "user",
-                        userPart.slice("User:".length).trim()
-                    );
-                }
-
-                if (assistantPart) {
-                    appendMessage(
-                        outputDiv,
-                        "assistant",
-                        assistantPart
-                    );
-                }
-
+            if (typeof message.content !== "string") {
                 continue;
             }
 
-            /*
-             * Fallback for malformed/legacy turns containing
-             * only one side of the conversation.
-             */
-
-            if (turn.startsWith("User: ")) {
-                appendMessage(
-                    outputDiv,
-                    "user",
-                    turn.slice("User: ".length)
-                );
-
-                continue;
-            }
-
-            if (turn.startsWith("Assistant: ")) {
-                appendMessage(
-                    outputDiv,
-                    "assistant",
-                    turn.slice("Assistant: ".length)
-                );
-
-                continue;
-            }
-
-            console.warn(
-                "[CHAT LOAD] Could not parse legacy turn:",
-                turn.slice(0, 200)
+            appendMessage(
+                outputDiv,
+                message.role,
+                message.content
             );
         }
-
     } catch (err) {
         console.error("Chat load failed:", err);
     }
