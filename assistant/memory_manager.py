@@ -181,11 +181,46 @@ class MemoryManager:
 
     @staticmethod
     def _split_turns(document: str) -> list[str]:
-        return [
-            turn.strip()
-            for turn in (document or "").split("[TURN_END]")
-            if turn.strip()
-        ]
+        """Convert a canonical JSON message list into searchable turn text."""
+        if not document or not isinstance(document, str):
+            return []
+
+        try:
+            messages = json.loads(document)
+        except json.JSONDecodeError:
+            return []
+
+        if not isinstance(messages, list):
+            return []
+
+        turns = []
+        pending_user = None
+
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+
+            role = message.get("role")
+            content = message.get("content")
+            if role not in {"user", "assistant"} or not isinstance(content, str):
+                continue
+
+            if role == "user":
+                if pending_user is not None:
+                    turns.append(f"User: {pending_user}")
+                pending_user = content
+                continue
+
+            if pending_user is None:
+                turns.append(f"Assistant: {content}")
+            else:
+                turns.append(f"User: {pending_user}\nAssistant: {content}")
+                pending_user = None
+
+        if pending_user is not None:
+            turns.append(f"User: {pending_user}")
+
+        return [turn.strip() for turn in turns if turn.strip()]
 
     def _delete_turn_index_for_chat(self, chat_id: str):
         if not chat_id:

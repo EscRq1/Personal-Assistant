@@ -335,13 +335,10 @@ class ResourceManager:
         return jina
 
     def _release_current(self):
-        if self.current_owner in (
-            GPUResource.ASSISTANT,
-            GPUResource.OBSERVER,
-        ):
-            self._release_llama_models()
+        # Release whatever is actually resident.
+        self._release_llama_models()
 
-        elif self.current_owner == GPUResource.JINA:
+        if self._jina is not None:
             self._release_jina()
 
         self.current_owner = GPUResource.NONE
@@ -386,13 +383,42 @@ class ResourceManager:
                 resource = GPUResource(resource.lower())
             except ValueError as exc:
                 raise ValueError(
-                    f"Unknown GPU resource: {resource!r}"
+                    f"Unknown resource: {resource!r}"
                 ) from exc
 
         with self.lock:
-            # Fast path.
-            if self.current_owner == resource:
+
+            # ------------------------------------------------------------
+            # Router is the source of truth.
+            # If the requested resource is already resident,
+            # adopt it instead of releasing/reloading it.
+            # ------------------------------------------------------------
+
+            if resource == GPUResource.ASSISTANT:
+                if self._is_loaded(self.assistant_model):
+                    self.current_owner = GPUResource.ASSISTANT
+                    return
+
+            elif resource == GPUResource.OBSERVER:
+                if self._is_loaded(self.observer_model):
+                    self.current_owner = GPUResource.OBSERVER
+                    return
+
+            elif resource == GPUResource.JINA:
+                if (
+                    self.current_owner == GPUResource.JINA
+                    and self._jina is not None
+                ):
+                    return
+
+            elif resource == GPUResource.NONE:
+                self._release_current()
                 return
+
+            # ------------------------------------------------------------
+            # Requested resource is not already resident.
+            # Perform the actual switch.
+            # ------------------------------------------------------------
 
             self._release_current()
 
@@ -404,9 +430,6 @@ class ResourceManager:
 
             if resource == GPUResource.JINA:
                 return self._allocate_jina()
-
-            if resource == GPUResource.NONE:
-                return None
 
             raise RuntimeError(
                 f"Unhandled resource: {resource}"
