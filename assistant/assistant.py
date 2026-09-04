@@ -33,6 +33,7 @@ class Controller:
         # Router model aliases from models.ini
         self.assistant_model = "assistant"
         self.support_model = "observer"
+        self.coder_model =  "coder"
 
         self.router_url = "http://127.0.0.1:8080"
 
@@ -71,8 +72,7 @@ class Controller:
             )
         
 
-        register_control_tool("high_thinking")
-        register_control_tool("xhigh_thinking")
+        register_control_tool("call_coder")
 
         self.tool_controller = ToolController(self)
 
@@ -255,7 +255,7 @@ class Controller:
                         if token:
                             content_parts.append(token)
 
-                            # Keep your existing real-time UI streaming.
+                            
                             yield token
 
                         # =================================================
@@ -289,7 +289,8 @@ class Controller:
                 call
                 for call in tool_calls
                 if (
-                    (call.get("function") or {}).get("name") in ["high_thinking" , "xhigh_thinking"]   
+                    # (call.get("function") or {}).get("name") in ["high_thinking" , "xhigh_thinking"]   
+                    (call.get("function") or {}).get("name") == "call_coder"
                 )
             ]
 
@@ -313,15 +314,15 @@ class Controller:
                 context = arguments.get("context", "").strip()
                 tool_name = function.get("name", "")
 
-                if tool_name == "high_thinking":
-                    mode = "high"
+                # if tool_name == "high_thinking":
+                #     mode = "high"
 
-                elif tool_name == "xhigh_thinking":
-                    mode = "xhigh"
+                # elif tool_name == "xhigh_thinking":
+                #     mode = "xhigh"
 
-                else:
-                    yield "\n\n[Coder] Invalid thinking mode."
-                    return
+                # else:
+                #     yield "\n\n[Coder] Invalid thinking mode."
+                #     return
 
                 if not task:
                     yield "\n\n[Coder] Missing task."
@@ -329,14 +330,14 @@ class Controller:
 
                 print(
                     f"{Fore.CYAN}"
-                    f"[AGENT] transferring control to coding mode in {mode} mode"
+                    f"[AGENT] transferring control to coding model"
                 )
 
                 for token in self.callCoder(
                     task=task,
                     context=context,
                     messages=messages,
-                    mode = mode,
+                    mode = "coder", #or mode is we reusing the same model's thinking tiers
                     websearch=web_enabled
                 ):
                     yield token
@@ -438,22 +439,57 @@ class Controller:
             tool["function"]["name"]
             for tool in tools
         ]
+        # Preserved for possible architectural changes
+        # if mode == "high":
+        #     escalation = (
+        #         "You may escalate to xhigh_thinking when "
+        #         "high-level reasoning is genuinely insufficient."
+        #     )
+        # else:
+        #     escalation = (
+        #         "You are the deepest reasoning tier. "
+        #         "You cannot escalate further."
+        #     )
 
-        if mode == "high":
-            escalation = (
-                "You may escalate to xhigh_thinking when "
-                "high-level reasoning is genuinely insufficient."
-            )
-        else:
-            escalation = (
-                "You are the deepest reasoning tier. "
-                "You cannot escalate further."
-            )
+        # return f"""
+        #         === EXECUTION CONTEXT ===
 
+        #         You are operating as the {mode.upper()}.
+
+        #         You are NOT the primary conversational assistant.
+        #         You are solving a task delegated by the parent assistant.
+
+        #         Main tier: assistant (medium)
+        #         Current tier: {mode}
+        #         Return target: assistant (medium)
+
+        #         === AVAILABLE TOOLS ===
+
+        #         {chr(10).join(f"- {name}" for name in tool_names)}
+
+        #         This list is authoritative for this invocation.
+        #         Do not assume tools exist because they were available
+        #         in another invocation.
+
+        #         === ESCALATION ===
+
+        #         {escalation}
+
+        #         === OUTPUT ===
+
+        #         Your output is an internal result for the parent tier.
+        #         The parent assistant is responsible for presenting the
+        #         final response to the user.
+
+        #         Do not claim that you directly interacted with the user.
+        #         Do not invent capabilities that are not present.
+
+        #         === END EXECUTION CONTEXT ===
+        #         """.strip()
         return f"""
                 === EXECUTION CONTEXT ===
 
-                You are operating as the {mode.upper()} reasoning tier.
+                You are operating as the {mode.upper()}.
 
                 You are NOT the primary conversational assistant.
                 You are solving a task delegated by the parent assistant.
@@ -470,9 +506,6 @@ class Controller:
                 Do not assume tools exist because they were available
                 in another invocation.
 
-                === ESCALATION ===
-
-                {escalation}
 
                 === OUTPUT ===
 
@@ -500,15 +533,16 @@ class Controller:
         `messages` is a snapshot of the parent tier's conversation.
         The child receives that context but owns its own copy from this point onward.
 
-        Flow:
-
-            assistant
+        Flow(depends on the models used, for ex: 
+        qwen3.8 with different thinking modes or disticnt assistant model and specialized coder model): 
+    
+            assistant               assistant
+                ↓                       ↓                       
+              high                   coder     
+                ↓           or  
+              xhigh
                 ↓
-            high
-                ↓
-            xhigh
-                ↓
-            return
+              return
 
         The child streams its output directly to the UI.
         """
@@ -585,10 +619,10 @@ class Controller:
 
             with self.resources.lock:
 
-                self.resources.acquire("assistant")
+                self.resources.acquire("coder")
 
                 payload = {
-                    "model": self.assistant_model,
+                    "model": self.coder_model,
                     "messages": messages,
 
                     "temperature": 0.2,
@@ -596,9 +630,6 @@ class Controller:
                     "stream": True,
                     "cache_prompt": True,
 
-                    "chat_template_kwargs": {
-                        "reasoning_effort": mode,
-                    },
                     "frequency_penalty": 0.3,
 
                     "tools": tools,
@@ -672,148 +703,149 @@ class Controller:
                     accumulated_tools
                 )
             )
-
+            # !!DO NOT DELETE!!
+            # Preserved for possible architectural changes  
             # --------------------------------------------------------
             # Check whether this tier wants to escalate.
             # --------------------------------------------------------
 
-            thinking_calls = [
-                call
-                for call in tool_calls
-                if (
-                    (call.get("function") or {}).get("name")
-                    in {
-                        "high_thinking",
-                        "xhigh_thinking",
-                    }
-                )
-            ]
+            # thinking_calls = [
+            #     call
+            #     for call in tool_calls
+            #     if (
+            #         (call.get("function") or {}).get("name")
+            #         in {
+            #             "high_thinking",
+            #             "xhigh_thinking",
+            #         }
+            #     )
+            # ]
 
-            if thinking_calls:
+            # if thinking_calls:
 
-                thinking_call = thinking_calls[0]
+            #     thinking_call = thinking_calls[0]
 
-                function = thinking_call.get("function") or {}
-                tool_name = function.get("name", "")
+            #     function = thinking_call.get("function") or {}
+            #     tool_name = function.get("name", "")
 
-                try:
-                    arguments = json.loads(
-                        function.get("arguments", "{}")
-                    )
+            #     try:
+            #         arguments = json.loads(
+            #             function.get("arguments", "{}")
+            #         )
 
-                except json.JSONDecodeError as exc:
+            #     except json.JSONDecodeError as exc:
 
-                    yield (
-                        f"\n\n[Coder] Invalid escalation "
-                        f"arguments: {exc}"
-                    )
-                    return
+            #         yield (
+            #             f"\n\n[Coder] Invalid escalation "
+            #             f"arguments: {exc}"
+            #         )
+            #         return
 
-                next_task = arguments.get(
-                    "task",
-                    "",
-                ).strip()
+            #     next_task = arguments.get(
+            #         "task",
+            #         "",
+            #     ).strip()
 
-                next_context = arguments.get(
-                    "context",
-                    "",
-                ).strip()
+            #     next_context = arguments.get(
+            #         "context",
+            #         "",
+            #     ).strip()
 
-                reason = arguments.get(
-                    "reason",
-                    "",
-                ).strip()
+            #     reason = arguments.get(
+            #         "reason",
+            #         "",
+            #     ).strip()
 
-                if not next_task:
-                    yield "\n\n[Coder] Missing escalation task."
-                    return
+            #     if not next_task:
+            #         yield "\n\n[Coder] Missing escalation task."
+            #         return
 
-                # ----------------------------------------------------
-                # HIGH → XHIGH is the only valid child escalation.
-                # XHIGH cannot escalate further.
-                # ----------------------------------------------------
+            #     # ----------------------------------------------------
+            #     # HIGH → XHIGH is the only valid child escalation.
+            #     # XHIGH cannot escalate further.
+            #     # ----------------------------------------------------
 
-                if mode == "high":
+            #     if mode == "high":
 
-                    if tool_name != "xhigh_thinking":
-                        yield (
-                            "\n\n[Coder] Invalid escalation: "
-                            "high may only escalate to xhigh."
-                        )
-                        return
+            #         if tool_name != "xhigh_thinking":
+            #             yield (
+            #                 "\n\n[Coder] Invalid escalation: "
+            #                 "high may only escalate to xhigh."
+            #             )
+            #             return
 
-                    print(
-                        f"{Fore.YELLOW}"
-                        "[CODER] escalating high -> xhigh"
-                    )
+            #         print(
+            #             f"{Fore.YELLOW}"
+            #             "[CODER] escalating high -> xhigh"
+            #         )
 
-                    # ------------------------------------------------
-                    # IMPORTANT:
-                    #
-                    # Preserve HIGH's current assistant message
-                    # BEFORE creating the XHIGH child.
-                    #
-                    # This gives XHIGH:
-                    #   - inherited parent context
-                    #   - HIGH's delegated task
-                    #   - HIGH's tool calls
-                    #   - HIGH's preceding output
-                    #   - HIGH's tool results
-                    # ------------------------------------------------
+            #         # ------------------------------------------------
+            #         # IMPORTANT:
+            #         #
+            #         # Preserve HIGH's current assistant message
+            #         # BEFORE creating the XHIGH child.
+            #         #
+            #         # This gives XHIGH:
+            #         #   - inherited parent context
+            #         #   - HIGH's delegated task
+            #         #   - HIGH's tool calls
+            #         #   - HIGH's preceding output
+            #         #   - HIGH's tool results
+            #         # ------------------------------------------------
 
-                    assistant_content = "".join(
-                        content_parts
-                    )
+            #         assistant_content = "".join(
+            #             content_parts
+            #         )
 
-                    messages.append(
-                        self.tool_controller
-                        .build_assistant_tool_message(
-                            content=assistant_content,
-                            tool_calls=tool_calls,
-                        )
-                    )
+            #         messages.append(
+            #             self.tool_controller
+            #             .build_assistant_tool_message(
+            #                 content=assistant_content,
+            #                 tool_calls=tool_calls,
+            #             )
+            #         )
 
-                    escalation_context = (
-                        f"{next_context}\n\n"
-                        f"=== HIGH ESCALATION ===\n"
-                        f"HIGH determined that its current reasoning "
-                        f"was insufficient.\n\n"
-                        f"REASON:\n{reason}"
-                    )
+            #         escalation_context = (
+            #             f"{next_context}\n\n"
+            #             f"=== HIGH ESCALATION ===\n"
+            #             f"HIGH determined that its current reasoning "
+            #             f"was insufficient.\n\n"
+            #             f"REASON:\n{reason}"
+            #         )
 
-                    # ------------------------------------------------
-                    # Recurse into XHIGH.
-                    #
-                    # `messages` is copied again inside callCoder(),
-                    # so XHIGH gets its own independent history.
-                    # ------------------------------------------------
+            #         # ------------------------------------------------
+            #         # Recurse into XHIGH.
+            #         #
+            #         # `messages` is copied again inside callCoder(),
+            #         # so XHIGH gets its own independent history.
+            #         # ------------------------------------------------
 
-                    for token in self.callCoder(
-                        task=next_task,
-                        context=escalation_context,
-                        messages=messages,
-                        mode="xhigh",
-                        websearch=websearch,
-                    ):
-                        yield token
+            #         for token in self.callCoder(
+            #             task=next_task,
+            #             context=escalation_context,
+            #             messages=messages,
+            #             mode="xhigh",
+            #             websearch=websearch,
+            #         ):
+            #             yield token
 
-                    return
+            #         return
 
-                # ----------------------------------------------------
-                # XHIGH cannot escalate.
-                # ----------------------------------------------------
+            #     # ----------------------------------------------------
+            #     # XHIGH cannot escalate.
+            #     # ----------------------------------------------------
 
-                else:
+            #     else:
 
-                    yield (
-                        "\n\n[Coder] XHIGH cannot escalate "
-                        "to another reasoning tier."
-                    )
-                    return
+            #         yield (
+            #             "\n\n[Coder] XHIGH cannot escalate "
+            #             "to another reasoning tier."
+            #         )
+            #         return
 
-            # --------------------------------------------------------
-            # No escalation.
-            # --------------------------------------------------------
+            # # --------------------------------------------------------
+            # # No escalation.
+            # # --------------------------------------------------------
 
             if not tool_calls:
 
@@ -1938,11 +1970,11 @@ class ToolController:
             web_enabled=web_enabled
         )
 
-        if mode == "high":
-            blocked = {"high_thinking"}
+        if mode == "coder":
+            blocked = {"call_coder"}
 
-        elif mode == "xhigh":
-            blocked = {"high_thinking", "xhigh_thinking"}
+        # elif mode == "xhigh":
+        #     blocked = {"high_thinking", "xhigh_thinking"}
 
         else:
             raise ValueError(

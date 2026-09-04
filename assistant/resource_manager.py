@@ -11,6 +11,7 @@ class GPUResource(str, Enum):
     NONE = "none"
     ASSISTANT = "assistant"
     OBSERVER = "observer"
+    CODER = "coder"
     JINA = "jina"
 
 
@@ -31,11 +32,13 @@ class ResourceManager:
         router_url: str = "http://127.0.0.1:8080",
         assistant_model: str = "assistant",
         observer_model: str = "observer",
+        coder_model: str = "coder",
         request_timeout: int = 300,
     ):
         self.router_url = router_url.rstrip("/")
         self.assistant_model = assistant_model
         self.observer_model = observer_model
+        self.coder_model = coder_model
         self.request_timeout = request_timeout
 
         self.current_owner = GPUResource.NONE
@@ -198,6 +201,7 @@ class ResourceManager:
         for model_name in (
             self.assistant_model,
             self.observer_model,
+            self.coder_model,
         ):
             try:
                 if self._is_loaded(model_name):
@@ -292,8 +296,8 @@ class ResourceManager:
             return
 
         # Router state is authoritative if Python state is stale.
-        if self._is_loaded(self.observer_model):
-            self._unload_llama_model(self.observer_model)
+        if self._is_loaded(self.observer_model) or self._is_loaded(self.coder_model):
+            self._release_llama_models()
 
         self._load_llama_model(self.assistant_model)
         self.current_owner = GPUResource.ASSISTANT
@@ -309,24 +313,32 @@ class ResourceManager:
             return
 
         # Router state is authoritative if Python state is stale.
-        if self._is_loaded(self.assistant_model):
-            self._unload_llama_model(self.assistant_model)
+        if self._is_loaded(self.assistant_model) or self._is_loaded(self.coder_model):
+            self._release_llama_models()
 
         self._load_llama_model(self.observer_model)
         self.current_owner = GPUResource.OBSERVER
 
+    def _allocate_coder(self):
+        if self._is_loaded(self.coder_model):
+            self.current_owner = GPUResource.CODER
+            print(
+                f"{Fore.GREEN}"
+                "[RESOURCE MANAGER] coder already loaded"
+            )
+            return
+        
+        if self._is_loaded(self.observer_model) or self._is_loaded(self.assistant_model):
+            self._release_llama_models()
+        
+        self._load_llama_model(self.coder_model)
+        self.current_owner = GPUResource.CODER
+
     def _allocate_jina(self):
         # Router is the source of truth.
         # Jina cannot coexist with a loaded llama.cpp model.
-        if self._is_loaded(self.assistant_model):
-            self._unload_llama_model(
-                self.assistant_model
-            )
-
-        if self._is_loaded(self.observer_model):
-            self._unload_llama_model(
-                self.observer_model
-            )
+        if any(self._is_loaded(model) for model in [self.assistant_model, self.coder_model, self.observer_model]):
+            self._release_llama_models()
 
         jina = self._create_jina()
 
@@ -352,16 +364,30 @@ class ResourceManager:
         with self.lock:
             assistant_loaded = self._is_loaded(self.assistant_model)
             observer_loaded = self._is_loaded(self.observer_model)
+            coder_loaded = self._is_loaded(self.coder_model)
 
-            if assistant_loaded and observer_loaded:
+            loaded_resources = [
+                resource
+                for resource, loaded in (
+                    (GPUResource.ASSISTANT, assistant_loaded),
+                    (GPUResource.OBSERVER, observer_loaded),
+                    (GPUResource.CODER, coder_loaded),
+                )
+                if loaded
+            ]
+
+            if len(loaded_resources) > 1:
                 raise RuntimeError(
-                    "Invalid router state: both assistant and observer are loaded"
+                    "Invalid router state: multiple llama.cpp models are loaded: "
+                    + ", ".join(resource.value for resource in loaded_resources)
                 )
 
             if assistant_loaded:
                 self.current_owner = GPUResource.ASSISTANT
             elif observer_loaded:
                 self.current_owner = GPUResource.OBSERVER
+            elif coder_loaded:
+                self.current_owner = GPUResource.CODER
             elif self._jina is not None:
                 self.current_owner = GPUResource.JINA
             else:
@@ -403,7 +429,10 @@ class ResourceManager:
                 if self._is_loaded(self.observer_model):
                     self.current_owner = GPUResource.OBSERVER
                     return
-
+            elif resource == GPUResource.CODER:
+                if self._is_loaded(self.coder_model):
+                    self.current_owner = GPUResource.CODER
+                    return
             elif resource == GPUResource.JINA:
                 if (
                     self.current_owner == GPUResource.JINA
@@ -427,6 +456,8 @@ class ResourceManager:
 
             if resource == GPUResource.OBSERVER:
                 return self._allocate_observer()
+            if resource == GPUResource.CODER:
+                return self._allocate_coder()
 
             if resource == GPUResource.JINA:
                 return self._allocate_jina()
