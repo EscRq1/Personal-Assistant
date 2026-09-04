@@ -64,85 +64,85 @@ TOOLS = [
             }
         }
     },
-
-    {
-        "type": "function",
-        "function": {
-            "name": "high_thinking",
-            "description": (
-                "Transfer control to coding mode using high reasoning effort. "
-                "Use this for programming, debugging, code analysis, implementation, "
-                "algorithm design, or software architecture tasks. Use this when the "
-                "task requires deeper technical reasoning than normal assistant mode. "
-                "Coding mode becomes responsible for solving the task and may use "
-                "web_call, memory_call, and vision_call when needed. "
-                "Do not use this merely because the request contains code; use it "
-                "when dedicated coding reasoning would improve the result."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": (
-                            "The exact programming or technical problem to solve."
-                        )
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": (
-                            "Relevant code, logs, requirements, constraints, "
-                            "and useful information gathered during the current turn."
-                        )
-                    }
-                },
-                "required": ["task", "context"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "xhigh_thinking",
-            "description": (
-                "Escalate the current coding task to extreme reasoning effort. "
-                "Use this ONLY when coding mode has already attempted the problem "
-                "with high reasoning and the problem remains unresolved, ambiguous, "
-                "or requires unusually deep multi-step analysis. "
-                "Do NOT use this for ordinary coding tasks, simple implementations, "
-                "routine debugging, or tasks that can reasonably be solved with high "
-                "reasoning. This is an expensive last-resort escalation."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": (
-                            "The unresolved coding problem that requires deeper "
-                            "reasoning."
-                        )
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": (
-                            "The relevant code, logs, previous reasoning results, "
-                            "tool results, attempted solutions, and constraints "
-                            "already considered during high-reasoning coding mode."
-                        )
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": (
-                            "Explain briefly why high-reasoning coding mode was "
-                            "insufficient and why extreme reasoning is justified."
-                        )
-                    }
-                },
-                "required": ["task", "context", "reason"]
-            }
-        }
-    },
+    # preserved for better times !!!DO NOT DELETE!!!
+    # { 
+    #     "type": "function",
+    #     "function": {
+    #         "name": "high_thinking",
+    #         "description": (
+    #             "Transfer control to coding mode using high reasoning effort. "
+    #             "Use this for programming, debugging, code analysis, implementation, "
+    #             "algorithm design, or software architecture tasks. Use this when the "
+    #             "task requires deeper technical reasoning than normal assistant mode. "
+    #             "Coding mode becomes responsible for solving the task and may use "
+    #             "web_call, memory_call, and vision_call when needed. "
+    #             "Do not use this merely because the request contains code; use it "
+    #             "when dedicated coding reasoning would improve the result."
+    #         ),
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "task": {
+    #                     "type": "string",
+    #                     "description": (
+    #                         "The exact programming or technical problem to solve."
+    #                     )
+    #                 },
+    #                 "context": {
+    #                     "type": "string",
+    #                     "description": (
+    #                         "Relevant code, logs, requirements, constraints, "
+    #                         "and useful information gathered during the current turn."
+    #                     )
+    #                 }
+    #             },
+    #             "required": ["task", "context"]
+    #         }
+    #     }
+    # },
+    # {
+    #     "type": "function",
+    #     "function": {
+    #         "name": "xhigh_thinking",
+    #         "description": (
+    #             "Escalate the current coding task to extreme reasoning effort. "
+    #             "Use this ONLY when coding mode has already attempted the problem "
+    #             "with high reasoning and the problem remains unresolved, ambiguous, "
+    #             "or requires unusually deep multi-step analysis. "
+    #             "Do NOT use this for ordinary coding tasks, simple implementations, "
+    #             "routine debugging, or tasks that can reasonably be solved with high "
+    #             "reasoning. This is an expensive last-resort escalation."
+    #         ),
+    #         "parameters": {
+    #             "type": "object",
+    #             "properties": {
+    #                 "task": {
+    #                     "type": "string",
+    #                     "description": (
+    #                         "The unresolved coding problem that requires deeper "
+    #                         "reasoning."
+    #                     )
+    #                 },
+    #                 "context": {
+    #                     "type": "string",
+    #                     "description": (
+    #                         "The relevant code, logs, previous reasoning results, "
+    #                         "tool results, attempted solutions, and constraints "
+    #                         "already considered during high-reasoning coding mode."
+    #                     )
+    #                 },
+    #                 "reason": {
+    #                     "type": "string",
+    #                     "description": (
+    #                         "Explain briefly why high-reasoning coding mode was "
+    #                         "insufficient and why extreme reasoning is justified."
+    #                     )
+    #                 }
+    #             },
+    #             "required": ["task", "context", "reason"]
+    #         }
+    #     }
+    # },
     {
         "type": "function",
         "function": {
@@ -189,14 +189,47 @@ TOOLS = [
                 "additionalProperties": False
             }
         }
-    }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "call_coder",
+            "description": (
+                "Delegate a programming or software-engineering task to the "
+                "dedicated coding specialist. Use this for difficult code "
+                "analysis, debugging, implementation, refactoring, architecture, "
+                "or other tasks that benefit from a dedicated coding model."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": (
+                            "The concrete programming task the coding specialist "
+                            "must solve."
+                        ),
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": (
+                            "Relevant code, logs, requirements, constraints, "
+                            "errors, or other technical context."
+                        ),
+                    },
+                },
+                "required": ["task"],
+            },
+        },
+    },
 ]
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}
 
 CONTROL_TOOLS = {
-    "high_thinking",
-    "xhigh_thinking"
+    # "high_thinking",
+    # "xhigh_thinking",
+    "call_coder",
 
 }
 

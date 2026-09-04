@@ -1,6 +1,12 @@
 import torch
+import os
 from transformers import AutoModel
 
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["ANONYMIZED_TELEMETRY"] = "False"
+os.environ["CHROMA_TELEMETRY_OFF"] = "True"
+os.environ["POSTHOG_DISABLED"] = "1"
 
 class JinaReranker:
     """
