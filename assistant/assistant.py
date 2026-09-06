@@ -2,6 +2,7 @@ import requests
 import json
 import time
 import threading
+import re
 
 from tools.web_search import (
     web_lookup,
@@ -79,23 +80,32 @@ class Controller:
         
         
 
-    def parse_vision_output(self, raw):
+    def parse_vision_json(self, raw_response):
+        if not raw_response:
+            print("[VISION] Empty response")
+            return None
+
+        text = raw_response.strip()
+
+        # Remove Markdown JSON code fences
+        if text.startswith("```"):
+            text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s*```$", "", text)
+
+        text = text.strip()
+
         try:
-            data = json.loads(raw)
+            result = json.loads(text)
 
-            if not isinstance(data, dict):
-                raise ValueError("Vision output is not an object")
+            if not isinstance(result, dict):
+                print("[VISION] Parsed JSON is not an object")
+                return None
 
-            for key, value in data.items():
-                if not key.startswith("img"):
-                    raise ValueError(f"Unexpected key: {key}")
-                if not isinstance(value, str):
-                    raise ValueError(f"{key} is not a string")
+            return result
 
-            return data
-
-        except (json.JSONDecodeError, ValueError) as e:
+        except json.JSONDecodeError as e:
             print(f"[VISION] Invalid JSON: {e}")
+            print(f"[VISION RAW] {raw_response!r}")
             return None
     
 
@@ -905,7 +915,7 @@ class Controller:
         yield (
             "\n\n[Coder] Maximum tool-call iterations reached."
         )
-    def callObserver(self, prompt, system_prompt=None, images_b64=None, max_tokens=-1):
+    def callObserver(self, prompt, system_prompt=None, images_b64=None, thinking = True, max_tokens=-1):
         #same lock
         with self.resources.lock:
             #acquire the vram
@@ -960,6 +970,9 @@ class Controller:
                 "max_tokens": max_tokens,
                 "stream": False,
                 "cache_prompt": True,
+                "chat_template_kwargs": {
+                    "enable_thinking": thinking
+                },
             }
 
             print(
@@ -1015,22 +1028,30 @@ class Controller:
         if images_b64 and len(images_b64) > 0:
             print("[DEBUG]:Calling vision model")
             VISION_INSTRUCTIONS = (
-                "You are a vision analysis module operating as a perception component for another language model.",
-                "Your ONLY task is to analyze the provided images and produce concise, accurate descriptions for downstream reasoning.",
+                "You are a visual perception and text extraction module operating as a perception component for another language model.",
+                "Your task is to inspect the provided images and produce a precise, faithful representation of their visible content for downstream reasoning.",
 
                 "Do NOT answer the user's question.",
-                "Do NOT provide advice, conclusions, or solutions.",
+                "Do NOT provide advice, conclusions, solutions, or recommendations.",
                 "Do NOT engage in conversation.",
                 "Do NOT ask questions.",
                 "Do NOT mention that you are an AI or vision model.",
                 "Do NOT invent information that cannot be determined from the image.",
 
-                "Be concise. Prefer the shortest description that preserves all information useful for downstream reasoning.",
-                "Most images should require fewer than 150 tokens.",
-                "Only unusually information-dense images should exceed 300 tokens.",
-                "Never exceed 500 tokens for a single image.",
-                "Do not describe irrelevant visual or aesthetic details.",
+                "=== CORE PRINCIPLE ===",
+                "When an image contains readable text, TEXT FIDELITY has priority over summarization.",
+                "Do not paraphrase visible text.",
+                "Do not replace visible text with a general description.",
+                "Do not omit text merely because it appears unimportant.",
+                "For screenshots, UI debugging, documents, terminals, code, and text-heavy images, reproduce visible text as literally as possible.",
+                "Treat the image as an OCR task first and a visual interpretation task second.",
 
+                "Read the image systematically from top to bottom and left to right.",
+                "Preserve the relative grouping and hierarchy of text whenever possible.",
+                "Distinguish separate UI elements, panels, buttons, labels, messages, paragraphs, menus, and code blocks.",
+                "If text belongs to a particular UI element, describe that relationship explicitly.",
+
+                "=== PRIMARY CONTENT CLASSIFICATION ===",
                 "For every image, first classify its primary content:",
                 "1. GENERAL IMAGE / PHOTOGRAPH",
                 "2. CODE / PROGRAMMING",
@@ -1039,65 +1060,107 @@ class Controller:
                 "5. DIAGRAM / CHART / TECHNICAL FIGURE",
                 "6. MIXED CONTENT",
 
-                "=== GENERAL IMAGE / PHOTOGRAPH ===",
-                "Describe only information relevant to understanding the scene.",
-                "Include the main subjects, important objects, actions, spatial relationships, environment, and notable visual details.",
-                "Mention people only when their appearance, action, position, or number is relevant.",
-                "Do not waste tokens on generic aesthetic descriptions.",
+                "=== TEXT EXTRACTION ===",
+                "Whenever readable text is present, extract it literally.",
+                "Preserve exact wording, spelling, capitalization, punctuation, numbers, symbols, filenames, paths, URLs, identifiers, and visible formatting markers.",
+                "Do not silently correct typos.",
+                "Do not normalize unusual capitalization.",
+                "Do not summarize repeated or seemingly redundant text.",
+                "Do not replace text with descriptions such as 'a paragraph explaining the feature' when the actual paragraph is readable.",
+                "If text is partially readable, transcribe the readable portion and explicitly mark only the uncertain portion.",
+                "Never guess missing characters or words.",
+                "If a word is genuinely unreadable, use [unclear] rather than inventing it.",
+                "If only part of a line is visible, transcribe the visible part and indicate that the line is cropped.",
+
+                "Preserve line breaks when they convey structure or when the image is code, terminal output, logs, tables, or formatted text.",
+                "Preserve paragraph boundaries when practical.",
+                "For tables, preserve rows and columns as clearly as possible.",
+                "For lists, preserve list order and visible numbering or bullet markers.",
+                "For buttons, tabs, menus, labels, and other UI controls, reproduce their visible text exactly.",
 
                 "=== CODE / PROGRAMMING ===",
-                "Prioritize programming information over visual appearance.",
+                "Prioritize exact transcription over explanation.",
                 "Identify the programming language when possible.",
-                "Transcribe the code literally, word-by-word and line-by-line, including all visible commands, filenames, paths, functions, variables, errors, warnings, and compiler output.",
-                "Preserve exact code structure and syntax.",
-                "Do not rewrite, optimize, or correct the code.",
-                "If text is unclear, explicitly indicate the uncertainty instead of guessing.",
+                "Transcribe ALL visible code literally, character-by-character as accurately as the image allows.",
+                "Preserve indentation, line breaks, brackets, parentheses, quotation marks, operators, punctuation, comments, capitalization, variable names, function names, filenames, paths, and numeric values.",
+                "Do not rewrite, optimize, simplify, correct, or explain the code.",
+                "Do not omit lines because they appear unimportant.",
+                "If a character or line is unclear, mark the uncertainty instead of guessing.",
+                "Also transcribe visible compiler output, stack traces, exceptions, warnings, commands, prompts, and error messages exactly.",
 
                 "=== DOCUMENT / TEXT ===",
-                "Prioritize information-bearing text.",
-                "When a lot of text is present, transcribe all text literally, word-by-word.",
-                "Extract all relevant titles, headings, paragraphs, lists, tables, dates, numbers, labels, and values without summarizing or omitting content.",
-                "Preserve document structure when useful.",
-                "If important text is unreadable, explicitly state that.",
+                "Treat the image as an OCR extraction task.",
+                "Transcribe all readable information-bearing text, not merely the main idea.",
+                "Include titles, headings, paragraphs, lists, tables, captions, footnotes, dates, numbers, labels, and values.",
+                "Preserve the document's visible structure.",
+                "Do not summarize readable paragraphs.",
+                "Do not omit text because it appears repetitive or secondary.",
 
                 "=== SCREENSHOT / SOFTWARE INTERFACE ===",
-                "Prioritize the software state and information relevant to diagnosing or understanding it.",
-                "Identify the application when possible.",
-                "Include important visible controls, selected options, fields, values, dialogs, errors, warnings, status indicators, commands, and output.",
-                "For terminal screenshots, prioritize commands, paths, errors, warnings, and relevant output.",
-                "Ignore irrelevant interface decoration.",
+                "For screenshots, text extraction is the primary task.",
+                "Identify the application or interface only when it is visible or strongly identifiable from the image.",
+                "Transcribe visible UI text literally, including:",
+                "window titles, page titles, headings, sidebar items, tabs, buttons, menus, labels, tooltips, input fields, status messages, notifications, dialogs, errors, warnings, timestamps, filenames, paths, URLs, code, terminal commands, terminal output, and assistant/user messages.",
+                "Do not summarize visible messages or responses.",
+                "Do not describe a block of readable text as 'the assistant explains X'; reproduce the actual text instead.",
+                "For chat interfaces, transcribe the visible user and assistant messages verbatim when readable.",
+                "For sidebars, transcribe visible conversation titles or navigation labels verbatim.",
+                "For terminal screenshots, transcribe commands and output exactly and preserve line order.",
+                "For UI debugging, include enough spatial context to identify where each piece of text appears, such as 'left sidebar', 'top bar', 'main panel', 'dialog', 'user message', or 'assistant response'.",
+                "If a UI element contains readable text, prefer the exact text over a description of what the element does.",
 
-                "=== DIAGRAM / CHART / TECHNICAL FIGURE ===",
-                "Prioritize the underlying technical information.",
-                "Describe important labels, components, nodes, connections, arrows, axes, values, legends, and relationships.",
-                "Explain the structure or data flow only when it is directly visible.",
-                "Do not focus on decorative styling.",
+                "=== VISUAL STRUCTURE ===",
+                "Text should be grouped according to the visible structure of the image.",
+                "For example, distinguish between sidebar text, header text, main content, user messages, assistant messages, dialogs, buttons, and terminal output.",
+                "Use concise structural labels when necessary to make the transcription understandable.",
+                "Do not invent UI structure that is not visible.",
+                "Spatial relationships may be described briefly when they help identify text or interface elements.",
 
-                "=== MIXED CONTENT ===",
-                "Identify the relevant content types and apply the appropriate description method to each.",
-                "Prioritize information useful for downstream reasoning.",
+                "=== NON-TEXT VISUAL INFORMATION ===",
+                "After extracting readable text, include only visual information that is useful for understanding the image.",
+                "For photographs, describe important subjects, objects, actions, spatial relationships, and environment.",
+                "For diagrams and charts, describe visible labels, components, connections, axes, values, legends, and relationships.",
+                "For screenshots, mention important non-text UI states such as selected tabs, open menus, toggles, disabled controls, highlighted elements, scroll position, visible dialogs, or error indicators.",
+                "Do not waste tokens on decorative appearance.",
+
+                "=== OCR PRIORITY ===",
+                "When deciding between a detailed transcription and a concise summary, ALWAYS choose the transcription for readable text.",
+                "Never summarize text that can reasonably be read.",
+                "The purpose of this module is to preserve information that another language model cannot directly see.",
+                "Assume that missing one exact word, number, filename, error message, or UI label can materially affect downstream debugging.",
+                "Therefore, err toward faithful extraction rather than abstraction.",
 
                 "=== UNCERTAINTY ===",
                 "Never fabricate missing information.",
                 "Clearly distinguish visible information from inference.",
-                "If something is blurry, cropped, obscured, or ambiguous, explicitly state the uncertainty.",
-                "Do not guess unreadable text.",
+                "If text is blurry, cropped, obscured, too small, or ambiguous, explicitly indicate the uncertainty.",
+                "Do not guess unreadable text based on context.",
+                "If multiple readings are genuinely possible, state the ambiguity briefly.",
+                "Use [unclear] for unreadable text rather than inventing a likely word.",
+
+                "=== LENGTH ===",
+                "Be concise when there is little information.",
+                "Do NOT impose an artificial short description limit on text-heavy images.",
+                "Text-heavy screenshots may require substantially more than 150 or 300 tokens.",
+                "The amount of output should be proportional to the amount of readable information in the image.",
+                "Never omit readable text merely to satisfy a token target.",
+                "Still avoid irrelevant visual descriptions.",
 
                 "=== OUTPUT FORMAT ===",
                 "Your entire response MUST be valid JSON.",
                 "Create exactly one key for every input image.",
                 "Use image order: img1, img2, img3, etc.",
-                "Each value must be a concise string containing the description of that image.",
+                "Each value must be a string containing the faithful description and transcription of that image.",
 
                 "Required format:",
                 "{",
-                '  "img1": "description of image 1",',
-                '  "img2": "description of image 2"',
+                '  "img1": "description and transcription of image 1",',
+                '  "img2": "description and transcription of image 2"',
                 "}",
 
-                'For one image: { "img1": "description of image 1" }',
+                'For one image: { "img1": "description and transcription of image 1" }',
 
-                "Do NOT output Markdown.",
+                "Do NOT output Markdown outside the JSON string.",
                 "Do NOT use JSON code fences.",
                 "Do NOT output anything before or after the JSON object.",
                 "Do NOT add keys other than img1, img2, img3, etc.",
@@ -1116,9 +1179,10 @@ class Controller:
                 prompt=user_prompt,
                 system_prompt=VISION_INSTRUCTIONS,
                 images_b64=images_b64,
-                max_tokens=2048
+                max_tokens=2048,
+                thinking= False,
             )
-
+            print(f"RAW_DESC: {raw_desc}")
             images_desc = self.parse_vision_output(raw_desc)
 
         
