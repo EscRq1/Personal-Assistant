@@ -17,7 +17,7 @@ from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
 
 app = Flask(__name__)
 CORS(app)  # Allows Electron to talk to it
-# Initialize Colorama for Windows terminal colors
+# Initialize Colorama for terminal colors
 init(autoreset=True)
 
 class Main:
