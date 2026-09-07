@@ -26,6 +26,11 @@ const attachmentTray = document.getElementById("attachment-tray");
 
 const toggleInput = document.querySelector(".switch input[type='checkbox']");
 
+const controlBtn = document.getElementById("control-btn");
+const controlImg = document.getElementById("control-img");
+
+let currentAbortController = null;
+
 let isCollapsed = true;
 let isHistory = false;
 let isOpened = false;
@@ -643,11 +648,13 @@ async function sendMessage() {
 
     if (!query && pendingImages.length === 0) return;
 
+    // Create the controller for THIS generation.
+    currentAbortController = new AbortController();
 
     // append text bubble
     if (query) appendMessage(outputDiv, "user", query);
 
-    // append images bubble (if any)
+    // append images bubble
     if (pendingImages.length > 0) {
         const imagesHtml = pendingImages
             .map((file) => {
@@ -659,11 +666,11 @@ async function sendMessage() {
         outputDiv.insertAdjacentHTML(
             "beforeend",
             `
-      <div class="msg user">
-        <div class="meta">Pics</div>
-        <div class="text">${imagesHtml}</div>
-      </div>
-      `
+            <div class="msg user">
+                <div class="meta">Pics</div>
+                <div class="text">${imagesHtml}</div>
+            </div>
+            `
         );
     }
 
@@ -677,29 +684,37 @@ async function sendMessage() {
         "beforeend",
         `<div id="${loadingId}" class="msg assistant thinking">Assistant is thinking...</div>`
     );
+
     outputDiv.scrollTop = outputDiv.scrollHeight;
 
-    // we're now on an active chat session (not viewing history)
     isHistory = false;
 
     try {
         const form = new FormData();
+
         form.append("query", query);
         form.append("websearch", isSearching);
 
-        pendingImages.forEach((img) => form.append("image", img));
+        pendingImages.forEach((img) => {
+            form.append("image", img);
+        });
 
-        // continue the same long-term chat if we loaded one
-        if (currentChatId) form.append("chat_id", currentChatId);
+        if (currentChatId) {
+            form.append("chat_id", currentChatId);
+        }
 
         pendingImages = [];
         attachmentTray.innerHTML = "";
         imgInput.value = "";
 
-        const response = await fetch("http://localhost:5000/ask", {
-            method: "POST",
-            body: form,
-        });
+        const response = await fetch(
+            "http://localhost:5000/ask",
+            {
+                method: "POST",
+                body: form,
+                signal: currentAbortController.signal,
+            }
+        );
 
         if (!response.ok) {
             throw new Error(`Server returned ${response.status}`);
@@ -708,32 +723,22 @@ async function sendMessage() {
         if (!response.body) {
             throw new Error("Response body is not streamable");
         }
-    
 
-        // clear image UI state
-        
-
-        // remove loading bubble
+        // Remove thinking bubble
         document.getElementById(loadingId)?.remove();
-
 
         // Create empty assistant message
         const assistantTextElement =
             appendMessage(outputDiv, "assistant", "");
 
-
-        // Accumulate the raw model response
         let fullResponse = "";
 
-
-        // Start reading SSE stream
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
 
         let buffer = "";
 
         while (true) {
-
             const { value, done } = await reader.read();
 
             if (done) break;
@@ -742,90 +747,96 @@ async function sendMessage() {
                 stream: true
             });
 
-
-            // SSE events are separated by blank lines
             const events = buffer.split("\n\n");
 
-            // Keep incomplete event for next network chunk
             buffer = events.pop();
 
-
             for (const event of events) {
-
                 const line = event.trim();
 
-                if (!line.startsWith("data: "))
+                if (!line.startsWith("data: ")) {
                     continue;
+                }
 
                 const data = line.slice(6);
-
 
                 if (data === "[DONE]") {
                     continue;
                 }
 
-
                 try {
-
                     const parsed = JSON.parse(data);
-
                     const token = parsed.token;
 
-                    if (!token)
+                    if (!token) {
                         continue;
+                    }
 
-
-                    // Add token to complete response
                     fullResponse += token;
 
-
-                    // Re-render existing message
                     updateMessage(
                         assistantTextElement,
                         "assistant",
                         fullResponse
                     );
 
-
-                    // Keep newest text visible
                     outputDiv.scrollTop =
                         outputDiv.scrollHeight;
 
                 } catch (error) {
-
                     console.error(
                         "Stream parsing error:",
                         error,
                         data
                     );
-
                 }
             }
         }
 
-
-        // refresh sidebar
+        // Normal completion
         await loadSidebarHistory();
 
-        // refresh tooltip summary
         try {
-            const sumRes = await fetch("http://localhost:5000/sum", { method: "POST" });
+            const sumRes = await fetch(
+                "http://localhost:5000/sum",
+                { method: "POST" }
+            );
+
             const summaryBlock = await sumRes.json();
 
-            header.innerText = summaryBlock.title || "New Chat";
+            header.innerText =
+                summaryBlock.title || "New Chat";
+
             header.style.setProperty(
                 "--snippet",
                 `"${summaryBlock.snippet || "No summary available."}"`
             );
-        } catch { }
+        } catch {}
 
     } catch (err) {
-        const loadingEl = document.getElementById(loadingId);
+        if (err.name === "AbortError") {
+            console.log("Generation stopped by user.");
+            document.getElementById(loadingId)?.remove();
+            const assistantTextElement =
+            appendMessage(outputDiv, "assistant", "Generation stopped by user");
+            return;
+        }
+
+        const loadingEl =
+            document.getElementById(loadingId);
+
         if (loadingEl) {
             loadingEl.innerText =
                 `Error: ${err.message || "Request failed."}`;
         }
+
         console.error(err);
+
+    } finally {
+        currentAbortController = null;
+
+        controlImg.src = "./assets/paper-plane-solid-full.svg";
+        controlBtn.onclick = send;
     }
 }
 
@@ -885,6 +896,20 @@ document.addEventListener("paste", (e) => {
 ain.addEventListener("keydown", async (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
-        await sendMessage();
+        await send();
     }
 });
+
+controlBtn.onclick = send;
+
+async function send() {
+    controlImg.src = "./assets/square-solid-full.svg";
+    controlBtn.onclick = stopAnswering;
+    await sendMessage();
+}
+
+function stopAnswering() {
+    if (!currentAbortController) return;
+
+    currentAbortController.abort();
+}

@@ -154,12 +154,12 @@ html, body {
   border: 1px solid gray;
   border-radius: 25px;
   display: grid;
-  grid-template-columns: 50px 1fr;
+  grid-template-columns: 50px 1fr 50px;
   grid-template-rows: auto auto 20px;
   grid-template-areas:
-    "tray tray"
-    "input input"
-    "attach filler";
+    "tray tray abort-btn"
+    "input input abort-btn"
+    "attach filler abort-btn";
   column-gap: 5px;
   width: 50vw;
   padding: 10px;
@@ -308,9 +308,7 @@ input:checked + .slider:before {
     grid-area: input;
     max-height: 200px;
 
-    
-
-    
+      
 }
 
 .input:focus {
@@ -344,12 +342,57 @@ input:checked + .slider:before {
     width: auto;
     font-size: 13px;
     border-radius: 5px;
+    
 
 }
 
 .i-btn:hover{
     background-color:#74747436 ;
+
 }
+
+.control-btn {
+    width: 30px;
+    height: 30px;
+    border-radius: 50px;
+    border-width: 0px;
+
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    
+}
+
+.control-btn:hover::after{
+    display: block;
+}
+
+.control-btn::after {
+    background-color: #ccc;
+    color: rgb(255, 255, 255);
+    font-size: 13px;
+    content: var(--snippet, "Send message");
+    position: absolute;
+    padding: 0 5px 0 5px;
+    display: none;
+    
+    margin-top: 55px; 
+    margin-left: 100px;
+    
+
+
+    transform: translateX(-50%); 
+    
+
+    white-space: nowrap; 
+    background: black;
+    color: white;
+    padding: 4px 8px;
+
+
+}
+
+
 
 .sidebar {
     grid-area: sidebar;
@@ -588,10 +631,14 @@ input:checked + .slider:before {
     border-radius: 8px;
     padding: 15px;
     margin: 10px 0;
-    overflow-x: auto; /* Allows scrolling for very long equations */
     text-align: center;
     border: 1px solid rgba(0,0,0,0.1);
+
+    max-width: 42.5vw; 
+    overflow-x: auto; 
 }
+
+
 
 /* Ensure KaTeX symbols don't look weird in your chat bubbles */
 .katex {
