@@ -3,7 +3,7 @@ import json
 import os
 import base64
 import uuid
-from threading import Lock
+import threading
 import time
 from datetime import datetime
 
@@ -12,7 +12,7 @@ from flask_cors import CORS
 from flask import send_from_directory
 from colorama import Fore, Style, init
 
-from assistant import Controller
+from assistant import Controller, ExecutionContext
 from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
 
 app = Flask(__name__)
@@ -28,7 +28,8 @@ class Main:
         self.summary = ""
         self.pending_profile_inputs = []  # New user messages, processed once on shutdown/save
         self.current_chat_id = None
-        self.finalize_lock = Lock()
+        self.finalize_lock, self.generation_lock = threading.Lock(), threading.Lock()
+        self.generation_cancel_handler = None
         self.notebook = memory_manager.assistant_notebook
 
     def make_chat_summary(self, chat_history: str) -> str:
@@ -187,7 +188,7 @@ class Main:
 
         self.short_term_memory = restored
 
-    def process_query(self, user_input, is_forced_search, images=None, restored_memory=None):
+    def process_query(self, user_input, is_forced_search, images=None, ctx=None):
         user_text_original = user_input  # keep clean copy for memory
         t0 = time.perf_counter()
 
@@ -281,8 +282,11 @@ class Main:
             system_prompt=system_prompt,
             images_b64=images_b64,
             purpose="prompt",
-            web_enabled = is_forced_search
-        ):
+            web_enabled = is_forced_search,
+            ctx = ctx
+        ):  
+            if ctx.cancel_event and ctx.cancel_event.is_set():
+                return
             full_response += token
             # Send token to Flask → Electron
             yield token
@@ -392,14 +396,36 @@ def ask():
     # -----------------------------
     search = parse_bool(raw_search)
     print(f"{Fore.YELLOW}[Server]: Received query: {query[:60]}... images={len(images) if images else 0}")
+    #Initialize this requests' abort handler
+    ctx = ExecutionContext()
+
+    with assistant.generation_lock:
+        assistant.generation_cancel_event = ctx.cancel_event
 
     def generate():
-        for token in assistant.process_query(
-            query,
-            search,
-            images=images
-        ):
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        try:
+            for token in assistant.process_query(
+                query,
+                search,
+                images=images,
+                ctx=ctx,
+            ):
+                yield f"data: {json.dumps({'token': token})}\n\n"
+
+                # Client may have disconnected.
+                # The next yield/read will normally cause GeneratorExit,
+                # but this also gives us a cooperative cancellation point.
+                if ctx.cancel_event.is_set():
+                    break
+
+        except GeneratorExit:
+            ctx.cancel_event.set()
+            raise
+
+        finally:
+            with assistant.generation_lock:
+                if assistant.generation_cancel_event is ctx.cancel_event:
+                    assistant.generation_cancel_event = None
 
     return Response(
         stream_with_context(generate()),

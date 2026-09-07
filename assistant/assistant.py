@@ -56,6 +56,7 @@ class Controller:
 
         self.memmgr = memory_manager
 
+
         register_tool(
             "web_call",
             self.web_call,
@@ -78,7 +79,6 @@ class Controller:
         self.tool_controller = ToolController(self)
 
         
-        
     
 
     # ============================================================
@@ -89,6 +89,7 @@ class Controller:
     def callAssistant(
         self,
         prompt,
+        ctx,
         target_temp=0.8,
         system_prompt=None,
         images_b64 = None,
@@ -227,7 +228,9 @@ class Controller:
                 # ====================================================
                 # ONE PHYSICAL LLAMA.CPP GENERATION
                 # ====================================================
-
+                if ctx.cancel_event and ctx.cancel_event.is_set():
+                    return
+                
                 with requests.post(
                     self.chat_endpoint,
                     json=payload,
@@ -238,6 +241,10 @@ class Controller:
                     response.raise_for_status()
 
                     for line in response.iter_lines():
+
+                        if ctx.cancel_event and ctx.cancel_event.is_set():
+                            response.close()
+                            return
 
                         if not line:
                             continue
@@ -350,6 +357,7 @@ class Controller:
 
                 for token in self.callCoder(
                     task=task,
+                    ctx = ctx,
                     context=context,
                     messages=messages,
                     mode = "coder", #or mode is we reusing the same model's thinking tiers
@@ -536,6 +544,7 @@ class Controller:
     
     def callCoder(
         self,
+        ctx,
         task: str,
         context: str,
         messages: list[dict],
@@ -654,6 +663,9 @@ class Controller:
                     "parallel_tool_calls": False,
                 }
 
+                if ctx.cancel_event and ctx.cancel_event.is_set():
+                    return
+
                 with requests.post(
                     self.chat_endpoint,
                     json=payload,
@@ -664,6 +676,9 @@ class Controller:
                     response.raise_for_status()
 
                     for line in response.iter_lines():
+                        if ctx.cancel_event and ctx.cancel_event.is_set():
+                            response.close()
+                            return
 
                         if not line:
                             continue
@@ -920,7 +935,7 @@ class Controller:
         yield (
             "\n\n[Coder] Maximum tool-call iterations reached."
         )
-    def callObserver(self, prompt, system_prompt=None, images_b64=None, thinking = True, max_tokens=-1):
+    def callObserver(self, prompt, ctx, system_prompt=None, images_b64=None, thinking = True, max_tokens=-1,):
         #same lock
         with self.resources.lock:
             #acquire the vram
@@ -1017,9 +1032,11 @@ class Controller:
         images_b64=None,
         model=None,
         max_tokens = None,
+        ctx = None,
     ) -> str:
 
         model = model or "Observer"
+
 
         print(
             f"MODEL USED: {model}, "
@@ -1030,23 +1047,25 @@ class Controller:
             "IMAGES COUNT:",
             len(images_b64) if images_b64 else 0,
         )
-        
+
         if model == "Assistant":
 
             return self.callAssistant(
                 prompt=prompt,
+                ctx = ctx,
                 target_temp=self.temp,
                 system_prompt=system_prompt,
                 web_enabled=web_enabled,
-                images_b64 = images_b64  
+                images_b64 = images_b64,
                 
             )
 
         return self.callObserver(
             prompt=prompt,
+            ctx = ctx,
             system_prompt=system_prompt,
             images_b64=images_b64,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
         )
 
     def web_call(
@@ -1875,3 +1894,9 @@ class ToolController:
             for tool in tools
             if tool["function"]["name"] not in blocked
         ]
+
+
+
+class ExecutionContext:
+    def __init__(self):
+        self.cancel_event = threading.Event()
