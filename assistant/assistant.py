@@ -941,6 +941,8 @@ class Controller:
             #acquire the vram
             self.resources.acquire("observer")
 
+            if ctx and ctx.cancel_event.is_set():
+                return ""
 
             messages = []
 
@@ -1005,7 +1007,10 @@ class Controller:
                 json=payload,
                 timeout=self.request_timeout,
             )
-
+            
+            if ctx and ctx.cancel_event.is_set():
+                return ""
+            
             response.raise_for_status()
 
             data = response.json()
