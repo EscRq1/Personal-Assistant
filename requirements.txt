@@ -7,6 +7,10 @@ python-dotenv
 colorama
 flask
 flask_cors
+transformers
+torch
+rapidfuzz
+
 
 
 
