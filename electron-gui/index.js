@@ -835,7 +835,9 @@ async function sendMessage() {
     } finally {
         currentAbortController = null;
 
-        controlImg.src = "./assets/paper-plane-solid-full.svg";
+        controlImg.src = "./assets/arrow-right-long-solid-full.svg";
+        controlBtn.style.setProperty(
+        "--snippet", `"Send message"`)
         controlBtn.onclick = send;
     }
 }
@@ -904,6 +906,8 @@ controlBtn.onclick = send;
 
 async function send() {
     controlImg.src = "./assets/square-solid-full.svg";
+    controlBtn.style.setProperty(
+        "--snippet", `"Stop answering"`)
     controlBtn.onclick = stopAnswering;
     await sendMessage();
 }
