@@ -916,4 +916,7 @@ function stopAnswering() {
     if (!currentAbortController) return;
 
     currentAbortController.abort();
+    fetch("http://localhost:5000/stop", {
+        method: "POST",
+    });
 }

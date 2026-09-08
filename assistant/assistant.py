@@ -1,8 +1,9 @@
 import requests
 import json
-import time
 import threading
-import re
+import asyncio
+from contextvars import ContextVar
+
 
 from tools.web_search import (
     web_lookup,
@@ -23,9 +24,14 @@ from tools.execute import (
 from colorama import Fore
 from resource_manager import resource_manager
 from memory_manager import memory_manager
+from llama_server_manager import LlamaRouterManager
 
 
 MAX_ITERATIONS = 8
+
+
+# Request-scoped context propagated through asyncio.to_thread().
+_execution_context = ContextVar("execution_context", default=None)
 
 
 class Controller:
@@ -36,8 +42,12 @@ class Controller:
         self.support_model = "observer"
         self.coder_model =  "coder"
 
-        self.router_url = "http://127.0.0.1:8080"
+        self.router = LlamaRouterManager()
 
+        self.router_url = f"http://{self.router.host}:{self.router.port}" #"http://127.0.0.1:8080"
+
+        self.router.start()
+        
         self.chat_endpoint = (
             f"{self.router_url}/v1/chat/completions"
         )
@@ -82,11 +92,208 @@ class Controller:
     
 
     # ============================================================
+    # Blocking LLM / tool execution helpers
+    # ============================================================
+
+    @staticmethod
+    def _queue_put(loop, queue, item):
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+
+    def _stream_llm_worker(
+        self,
+        payload,
+        owner,
+        ctx,
+        queue,
+        loop,
+        accumulated_tools,
+    ):
+        """
+        Run one physical llama.cpp streaming request in a worker thread.
+
+        requests.post() and response.iter_lines() are blocking, so neither
+        is allowed to run on the asyncio event-loop thread.
+        """
+
+        response = None
+
+        # The ResourceManager lock belongs around the physical inference
+        # request. The lock is intentionally acquired inside this worker
+        # thread, not across an asyncio await.
+        with self.resources.lock:
+            self.resources.acquire(owner)
+
+            if ctx.cancel_event.is_set():
+                self._queue_put(loop, queue, ("done", None))
+                return
+
+            ctx.begin_llm()
+
+            try:
+                response = requests.post(
+                    self.chat_endpoint,
+                    json=payload,
+                    stream=True,
+                    timeout=self.request_timeout,
+                )
+
+                ctx.set_response(response)
+                response.raise_for_status()
+
+                for line in response.iter_lines():
+                    if ctx.cancel_event.is_set():
+                        return
+
+                    if not line:
+                        continue
+
+                    line = line.decode("utf-8")
+
+                    if not line.startswith("data: "):
+                        continue
+
+                    data = line[6:]
+
+                    if data == "[DONE]":
+                        break
+
+                    chunk = json.loads(data)
+                    choice = chunk["choices"][0]
+
+                    delta = (
+                        choice.get("delta")
+                        or {}
+                    )
+
+                    token = delta.get("content")
+
+                    if token:
+                        self._queue_put(
+                            loop,
+                            queue,
+                            ("token", token),
+                        )
+
+                    tool_deltas = delta.get("tool_calls")
+
+                    if tool_deltas:
+                        self.tool_controller.merge_tool_call_deltas(
+                            accumulated_tools,
+                            tool_deltas,
+                        )
+
+            except Exception as exc:
+                if not ctx.cancel_event.is_set():
+                    self._queue_put(
+                        loop,
+                        queue,
+                        ("error", exc),
+                    )
+
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
+
+                ctx.clear_response(response)
+                ctx.end_llm()
+
+                self._queue_put(
+                    loop,
+                    queue,
+                    ("done", None),
+                )
+
+    async def _stream_llm_with_tools(
+        self,
+        payload,
+        owner,
+        ctx,
+        accumulated_tools,
+    ):
+        """Bridge a blocking streaming request into asyncio."""
+
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        worker = threading.Thread(
+            target=self._stream_llm_worker,
+            args=(
+                payload,
+                owner,
+                ctx,
+                queue,
+                loop,
+                accumulated_tools,
+            ),
+            daemon=True,
+        )
+        worker.start()
+
+        while True:
+            kind, value = await queue.get()
+
+            if kind == "token":
+                if ctx.cancel_event.is_set():
+                    return
+
+                yield value
+
+            elif kind == "error":
+                raise value
+
+            elif kind == "done":
+                return
+
+    @staticmethod
+    def _consume_background_task(task):
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(
+                f"[ASYNC WORKER] background task failed after cancellation: {exc}"
+            )
+
+    async def _run_blocking_cancellable(
+        self,
+        ctx,
+        function,
+        *args,
+        **kwargs,
+    ):
+        """
+        Run blocking synchronous work in a worker thread.
+
+        The worker itself cannot be forcefully killed safely. On cancellation
+        the asyncio side stops waiting for its result and discards that result.
+        """
+
+        task = asyncio.create_task(
+            asyncio.to_thread(function, *args, **kwargs)
+        )
+
+        while not task.done():
+            if ctx.cancel_event.is_set():
+                # The Python worker is allowed to finish naturally. Consume
+                # any eventual exception so it cannot become an unhandled-task
+                # warning after the logical request has already stopped.
+                task.add_done_callback(self._consume_background_task)
+                return None
+
+            await asyncio.sleep(0.02)
+
+        return await task
+
+    # ============================================================
     # Assistant streaming
     # ============================================================
         
 
-    def callAssistant(
+    async def callAssistant(
         self,
         prompt,
         ctx,
@@ -186,114 +393,70 @@ class Controller:
             # Only lock the ResourceManager while this actual
             # assistant inference request is running.
             #
-            # We must release it before executing a tool because
-            # the tool may need Observer/Jina/etc.
+            # The blocking HTTP request is executed in a worker thread.
+            # This keeps the asyncio event loop available for the
+            # cancellation watchdog and the streaming bridge.
+            #
+            # The worker owns the ResourceManager lock and releases it
+            # before this function continues to tool execution.
             # ----------------------------------------------------
 
-            with self.resources.lock:
+            payload = {
+                "model": self.assistant_model,
+                "messages": messages,
 
-                self.resources.acquire("assistant")
+                "temperature": target_temp,
+                "max_tokens": -1,
 
-                payload = {
-                    "model": self.assistant_model,
-                    "messages": messages,
+                "stream": True,
+                "cache_prompt": True,
 
-                    "temperature": target_temp,
-                    "max_tokens": -1,
+                # ==================================================
+                # TOOL CALLING
+                # ==================================================
 
-                    "stream": True,
-                    "cache_prompt": True,
+                "tools": self.tool_controller.get_available_tools(
+                    web_enabled=web_enabled
+                ),
+                "tool_choice": "auto",
 
-                    # ==================================================
-                    # TOOL CALLING
-                    # ==================================================
+                # Let llama.cpp parse the model's tool-call format.
+                "parse_tool_calls": True,
 
-                    "tools": self.tool_controller.get_available_tools(
-                        web_enabled=web_enabled
-                    ),
-                    "tool_choice": "auto",
+                # Keep first test deterministic/simple.
+                "parallel_tool_calls": False,
+            }
 
-                    # Let llama.cpp parse the model's tool-call format.
-                    "parse_tool_calls": True,
+            print(
+                f"{Fore.CYAN}"
+                f"MODEL USED: Assistant"
+            )
 
-                    # Keep first test deterministic/simple.
-                    "parallel_tool_calls": False,
-                }
+            # ====================================================
+            # ONE PHYSICAL LLAMA.CPP GENERATION
+            # ====================================================
+            if ctx.cancel_event and ctx.cancel_event.is_set():
+                return
 
-                print(
-                    f"{Fore.CYAN}"
-                    f"MODEL USED: Assistant"
-                )
+            accumulated_tools = {}
 
-                # ====================================================
-                # ONE PHYSICAL LLAMA.CPP GENERATION
-                # ====================================================
-                if ctx.cancel_event and ctx.cancel_event.is_set():
+            try:
+                async for token in self._stream_llm_with_tools(
+                    payload=payload,
+                    owner="assistant",
+                    ctx=ctx,
+                    accumulated_tools=accumulated_tools,
+                ):
+                    content_parts.append(token)
+                    yield token
+
+            except Exception:
+                if ctx.cancel_event.is_set():
                     return
-                
-                with requests.post(
-                    self.chat_endpoint,
-                    json=payload,
-                    stream=True,
-                    timeout=self.request_timeout,
-                ) as response:
+                raise
 
-                    response.raise_for_status()
-
-                    for line in response.iter_lines():
-
-                        if ctx.cancel_event and ctx.cancel_event.is_set():
-                            response.close()
-                            return
-
-                        if not line:
-                            continue
-
-                        line = line.decode("utf-8")
-
-                        if not line.startswith("data: "):
-                            continue
-
-                        data = line[6:]
-
-                        if data == "[DONE]":
-                            break
-
-                        chunk = json.loads(data)
-
-                        choice = chunk["choices"][0]
-
-                        delta = (
-                            choice.get("delta")
-                            or {}
-                        )
-
-                        # =================================================
-                        # NORMAL CONTENT
-                        # =================================================
-
-                        token = delta.get("content")
-
-                        if token:
-                            content_parts.append(token)
-
-                            
-                            yield token
-
-                        # =================================================
-                        # TOOL CALL DELTAS
-                        # =================================================
-
-                        tool_deltas = delta.get(
-                            "tool_calls"
-                        )
-
-                        if tool_deltas:
-
-                            self.tool_controller.merge_tool_call_deltas(
-                                accumulated_tools,
-                                tool_deltas,
-                            )
+            if ctx.cancel_event.is_set():
+                return
 
             # ========================================================
             # PHYSICAL GENERATION IS FINISHED
@@ -355,7 +518,7 @@ class Controller:
                     f"[AGENT] transferring control to coding model"
                 )
 
-                for token in self.callCoder(
+                async for token in self.callCoder(
                     task=task,
                     ctx = ctx,
                     context=context,
@@ -411,15 +574,26 @@ class Controller:
             # This is critical for the future Observer/RAG tools.
             # --------------------------------------------------------
 
-            results = (
-                self.tool_controller.execute_tool_calls(
-                    tool_calls
-                )
+            if ctx.cancel_event.is_set():
+                return
+
+            results = await self._run_blocking_cancellable(
+                ctx,
+                self.tool_controller.execute_tool_calls,
+                tool_calls,
             )
 
-            results = self.tool_controller.compress_web_batch(
-                results
+            if results is None or ctx.cancel_event.is_set():
+                return
+
+            results = await self._run_blocking_cancellable(
+                ctx,
+                self.tool_controller.compress_web_batch,
+                results,
             )
+
+            if results is None or ctx.cancel_event.is_set():
+                return
 
             # --------------------------------------------------------
             # Append tool results to the same logical conversation.
@@ -542,7 +716,7 @@ class Controller:
                 === END EXECUTION CONTEXT ===
                 """.strip()
     
-    def callCoder(
+    async def callCoder(
         self,
         ctx,
         task: str,
@@ -574,7 +748,6 @@ class Controller:
         # ------------------------------------------------------------
         # Create an independent conversation for this reasoning tier.
         # ------------------------------------------------------------
-
         messages = list(messages)
 
         # ------------------------------------------------------------
@@ -639,90 +812,54 @@ class Controller:
 
             # --------------------------------------------------------
             # Model inference.
+            #
+            # The physical HTTP stream runs in a worker thread. This keeps
+            # the asyncio event loop available for cancellation, Flask/SSE,
+            # and other coroutine work.
             # --------------------------------------------------------
 
-            with self.resources.lock:
+            payload = {
+                "model": self.coder_model,
+                "messages": messages,
 
-                self.resources.acquire("coder")
+                "temperature": 0.2,
 
-                payload = {
-                    "model": self.coder_model,
-                    "messages": messages,
+                "stream": True,
+                "cache_prompt": True,
 
-                    "temperature": 0.2,
+                "frequency_penalty": 0.3,
 
-                    "stream": True,
-                    "cache_prompt": True,
+                "tools": tools,
+                "tool_choice": "auto",
 
-                    "frequency_penalty": 0.3,
+                "parse_tool_calls": True,
+                "parallel_tool_calls": False,
+            }
 
-                    "tools": tools,
-                    "tool_choice": "auto",
+            if ctx.cancel_event and ctx.cancel_event.is_set():
+                return
 
-                    "parse_tool_calls": True,
-                    "parallel_tool_calls": False,
-                }
+            accumulated_tools = {}
 
-                if ctx.cancel_event and ctx.cancel_event.is_set():
+            try:
+                async for token in self._stream_llm_with_tools(
+                    payload=payload,
+                    owner="coder",
+                    ctx=ctx,
+                    accumulated_tools=accumulated_tools,
+                ):
+                    content_parts.append(token)
+
+                    # Keep streaming directly to the UI.
+                    yield token
+
+            except Exception:
+                if ctx.cancel_event.is_set():
                     return
+                raise
 
-                with requests.post(
-                    self.chat_endpoint,
-                    json=payload,
-                    stream=True,
-                    timeout=self.request_timeout,
-                ) as response:
-
-                    response.raise_for_status()
-
-                    for line in response.iter_lines():
-                        if ctx.cancel_event and ctx.cancel_event.is_set():
-                            response.close()
-                            return
-
-                        if not line:
-                            continue
-
-                        line = line.decode("utf-8")
-
-                        if not line.startswith("data: "):
-                            continue
-
-                        data = line[6:]
-
-                        if data == "[DONE]":
-                            break
-
-                        chunk = json.loads(data)
-
-                        delta = (
-                            chunk["choices"][0].get("delta")
-                            or {}
-                        )
-
-                        # ------------------------------------------------
-                        # Normal generated content.
-                        # ------------------------------------------------
-
-                        token = delta.get("content")
-
-                        if token:
-                            content_parts.append(token)
-
-                            # Keep streaming directly to the UI.
-                            yield token
-
-                        # ------------------------------------------------
-                        # Tool-call fragments.
-                        # ------------------------------------------------
-
-                        tool_deltas = delta.get("tool_calls")
-
-                        if tool_deltas:
-                            self.tool_controller.merge_tool_call_deltas(
-                                accumulated_tools,
-                                tool_deltas,
-                            )
+            if ctx.cancel_event.is_set():
+                return
 
             # --------------------------------------------------------
             # Generation finished.
@@ -908,15 +1045,26 @@ class Controller:
                 )
             )
 
-            results = (
-                self.tool_controller.execute_tool_calls(
-                    tool_calls
-                )
+            if ctx.cancel_event.is_set():
+                return
+
+            results = await self._run_blocking_cancellable(
+                ctx,
+                self.tool_controller.execute_tool_calls,
+                tool_calls,
             )
 
-            results = self.tool_controller.compress_web_batch(
-                results
+            if results is None or ctx.cancel_event.is_set():
+                return
+
+            results = await self._run_blocking_cancellable(
+                ctx,
+                self.tool_controller.compress_web_batch,
+                results,
             )
+
+            if results is None or ctx.cancel_event.is_set():
+                return
 
             for result in results:
 
@@ -935,10 +1083,18 @@ class Controller:
         yield (
             "\n\n[Coder] Maximum tool-call iterations reached."
         )
-    def callObserver(self, prompt, ctx, system_prompt=None, images_b64=None, thinking = True, max_tokens=-1,):
-        #same lock
+    def _callObserver_sync(
+        self,
+        prompt,
+        ctx,
+        system_prompt=None,
+        images_b64=None,
+        thinking=True,
+        max_tokens=-1,
+    ):
+        """Blocking Observer request; run this inside a worker thread."""
+
         with self.resources.lock:
-            #acquire the vram
             self.resources.acquire("observer")
 
             if ctx and ctx.cancel_event.is_set():
@@ -955,7 +1111,6 @@ class Controller:
                 })
 
             if images_b64:
-
                 content = [
                     {
                         "type": "text",
@@ -967,9 +1122,7 @@ class Controller:
                     content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": (
-                                f"data:image/jpeg;base64,{img}"
-                            )
+                            "url": f"data:image/jpeg;base64,{img}"
                         },
                     })
 
@@ -977,9 +1130,7 @@ class Controller:
                     "role": "user",
                     "content": content,
                 })
-
             else:
-
                 messages.append({
                     "role": "user",
                     "content": prompt,
@@ -1002,33 +1153,69 @@ class Controller:
                 f"MODEL USED: Observer"
             )
 
-            response = requests.post(
-                self.chat_endpoint,
-                json=payload,
-                timeout=self.request_timeout,
-            )
-            
-            if ctx and ctx.cancel_event.is_set():
-                return ""
-            
-            response.raise_for_status()
+            if ctx:
+                ctx.begin_llm()
 
-            data = response.json()
+            response = None
 
-            message = data["choices"][0]["message"]
+            try:
+                response = requests.post(
+                    self.chat_endpoint,
+                    json=payload,
+                    timeout=self.request_timeout,
+                )
 
-            content = message.get("content") or ""
+                if ctx:
+                    ctx.set_response(response)
 
+                if ctx and ctx.cancel_event.is_set():
+                    return ""
 
-            if content.strip():
-                return content
+                response.raise_for_status()
 
+                data = response.json()
+                message = data["choices"][0]["message"]
+                content = message.get("content") or ""
 
-            return ""
+                if ctx and ctx.cancel_event.is_set():
+                    return ""
 
+                return content if content.strip() else ""
 
+            finally:
+                if response is not None:
+                    try:
+                        response.close()
+                    except Exception:
+                        pass
 
-    def ask(
+                if ctx:
+                    ctx.clear_response(response)
+                    ctx.end_llm()
+
+    async def callObserver(
+        self,
+        prompt,
+        ctx,
+        system_prompt=None,
+        images_b64=None,
+        thinking=True,
+        max_tokens=-1,
+    ):
+        """Run Observer without blocking the asyncio event loop."""
+
+        return await self._run_blocking_cancellable(
+            ctx,
+            self._callObserver_sync,
+            prompt,
+            ctx,
+            system_prompt,
+            images_b64,
+            thinking,
+            max_tokens,
+        )
+
+    async def ask(
         self,
         prompt: str,
         purpose: str,
@@ -1036,12 +1223,19 @@ class Controller:
         system_prompt=None,
         images_b64=None,
         model=None,
-        max_tokens = None,
-        ctx = None,
-    ) -> str:
+        max_tokens=None,
+        ctx=None,
+    ):
+        if ctx is None:
+            raise ValueError("ExecutionContext is required")
+
+        context_token = _execution_context.set(ctx)
+
+        watchdog = asyncio.create_task(
+            ctx.abort_event_observer(self)
+        )
 
         model = model or "Observer"
-
 
         print(
             f"MODEL USED: {model}, "
@@ -1053,25 +1247,62 @@ class Controller:
             len(images_b64) if images_b64 else 0,
         )
 
-        if model == "Assistant":
+        try:
+            if model == "Assistant":
+                async for token in self.callAssistant(
+                    prompt=prompt,
+                    ctx=ctx,
+                    target_temp=self.temp,
+                    system_prompt=system_prompt,
+                    web_enabled=web_enabled,
+                    images_b64=images_b64,
+                ):
+                    if ctx.cancel_event.is_set():
+                        return
 
-            return self.callAssistant(
-                prompt=prompt,
-                ctx = ctx,
-                target_temp=self.temp,
-                system_prompt=system_prompt,
-                web_enabled=web_enabled,
-                images_b64 = images_b64,
-                
-            )
+                    yield token
 
-        return self.callObserver(
-            prompt=prompt,
-            ctx = ctx,
-            system_prompt=system_prompt,
-            images_b64=images_b64,
-            max_tokens=max_tokens,
-        )
+            else:
+                result = await self.callObserver(
+                    prompt=prompt,
+                    ctx=ctx,
+                    system_prompt=system_prompt,
+                    images_b64=images_b64,
+                    max_tokens=max_tokens,
+                )
+
+                if ctx.cancel_event.is_set():
+                    return
+
+                if result:
+                    yield result
+
+        finally:
+            watchdog.cancel()
+
+            if ctx.router_restart_required.is_set():
+                try:
+                    # Let the worker that owned the killed HTTP request
+                    # finish unwinding before the router is restarted.
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.to_thread(ctx.llm_done.wait),
+                            timeout=2.0,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
+
+                    await asyncio.to_thread(
+                        self.router.restart
+                    )
+
+                    self.resources.current_owner = None
+                    self.resources.reconcile()
+
+                finally:
+                    ctx.router_restart_required.clear()
+
+            _execution_context.reset(context_token)
 
     def web_call(
         self,
@@ -1085,6 +1316,11 @@ class Controller:
         evidence, then Observer summarizes the evidence.
         """
 
+
+        ctx = _execution_context.get()
+
+        if ctx and ctx.cancel_event.is_set():
+            return json.dumps({"error": "Request cancelled."})
 
         if not request or not request.strip():
             return json.dumps({
@@ -1117,6 +1353,9 @@ class Controller:
             total_chars=30000,
         )
 
+        if ctx and ctx.cancel_event.is_set():
+            return json.dumps({"error": "Request cancelled."})
+
 
         if not raw_evidence:
             return json.dumps({
@@ -1148,6 +1387,11 @@ class Controller:
         Chroma produces a small candidate set.
         Observer selects the actually relevant memories.
         """
+
+        ctx = _execution_context.get()
+
+        if ctx and ctx.cancel_event.is_set():
+            return json.dumps({"error": "Request cancelled."})
 
         if self.memmgr is None:
             return json.dumps({
@@ -1228,14 +1472,18 @@ class Controller:
             f"CANDIDATE MEMORIES:\n{candidate_text}"
         )
 
-        raw_selection = self.callObserver(
+        raw_selection = self._callObserver_sync(
             prompt=observer_prompt,
+            ctx=ctx,
             system_prompt=(
                 "Select relevant historical memory entries. "
                 "Return only valid JSON."
             ),
             max_tokens=1024,
         )
+
+        if ctx and ctx.cancel_event.is_set():
+            return json.dumps({"error": "Request cancelled."})
 
         # ========================================================
         # 3. Parse Observer selection
@@ -1556,6 +1804,11 @@ class ToolController:
         The result is then attached back to the web tool messages.
         """
 
+        ctx = _execution_context.get()
+
+        if ctx and ctx.cancel_event.is_set():
+            return results
+
         web_results = [
             result
             for result in results
@@ -1669,8 +1922,9 @@ class ToolController:
             f"WEB EVIDENCE:\n{compressed_input}"
         )
 
-        summary = self.callObserver(
+        summary = self.controller._callObserver_sync(
             prompt=summary_prompt,
+            ctx=ctx,
             system_prompt=(
                 "You are a web-evidence compression component. "
                 "Return only compact factual research context. "
@@ -1678,8 +1932,11 @@ class ToolController:
                 "Do not reason aloud."
             ),
             max_tokens=4096,
-            enable_thinking=False,
+            thinking=False,
         ).strip()
+
+        if ctx and ctx.cancel_event.is_set():
+            return results
 
         if not summary:
             print(
@@ -1905,3 +2162,131 @@ class ToolController:
 class ExecutionContext:
     def __init__(self):
         self.cancel_event = threading.Event()
+
+        # True while a physical llama-router inference request is active.
+        self.llm_active = threading.Event()
+        self.llm_done = threading.Event()
+        self.llm_done.set()
+
+        # Currently active requests.Response object, when available.
+        self._response = None
+        self._response_lock = threading.Lock()
+
+        # Set when cancellation forced router termination. The top-level
+        # ask() cleanup restarts it after the current logical request unwinds.
+        self.router_restart_required = threading.Event()
+
+    def begin_llm(self):
+        self.llm_done.clear()
+        self.llm_active.set()
+
+    def end_llm(self):
+        self.llm_active.clear()
+        self.llm_done.set()
+        self.clear_response()
+
+    def set_response(self, response):
+        with self._response_lock:
+            self._response = response
+
+    def clear_response(self, response=None):
+        with self._response_lock:
+            if response is None or self._response is response:
+                self._response = None
+
+    def close_response(self):
+        with self._response_lock:
+            response = self._response
+
+        if response is not None:
+            try:
+                response.close()
+            except Exception:
+                pass
+
+    async def abort_event_observer(
+        self,
+        controller,
+        graceful_timeout=0.5,
+        terminate_timeout=0.5,
+    ):
+        """
+        Multi-stage cancellation watchdog.
+
+        Stage 1: the normal pipeline sees cancel_event.
+        Stage 2: close the active HTTP response.
+        Stage 3: give the request a short grace period.
+        Stage 4: SIGTERM the llama router.
+        Stage 5: give router termination a short grace period.
+        Stage 6: SIGKILL the router if it is still alive.
+        """
+
+        # The actual blocking LLM/web/tool work is now off the asyncio
+        # event-loop thread, so a small polling loop here is safe and avoids
+        # leaking a worker thread when this watchdog is cancelled normally.
+        while not self.cancel_event.is_set():
+            await asyncio.sleep(0.02)
+
+        print("[CANCEL] Cancellation requested")
+
+        # Cancellation during a blocking tool/web operation does not have a
+        # safe way to kill its Python worker thread. The async side will stop
+        # waiting for that result and unwind. An active LLM request, however,
+        # can be terminated at the router-process level.
+        if not self.llm_active.is_set():
+            print("[CANCEL] No active LLM request")
+            return
+
+        # --------------------------------------------------------
+        # Stage 2: close active HTTP response
+        # --------------------------------------------------------
+
+        print("[CANCEL] Closing active HTTP response")
+        self.close_response()
+
+        # --------------------------------------------------------
+        # Stage 3: graceful request unwind
+        # --------------------------------------------------------
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self.llm_done.wait),
+                timeout=graceful_timeout,
+            )
+
+            print("[CANCEL] HTTP request stopped gracefully")
+            return
+
+        except asyncio.TimeoutError:
+            pass
+
+        # --------------------------------------------------------
+        # Stage 4: terminate router
+        # --------------------------------------------------------
+
+        print("[CANCEL] HTTP request still active; terminating router")
+
+        controller.router.terminate()
+        self.router_restart_required.set()
+
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(self.llm_done.wait),
+                timeout=terminate_timeout,
+            )
+
+            print("[CANCEL] Router termination stopped inference")
+            return
+
+        except asyncio.TimeoutError:
+            pass
+
+        # --------------------------------------------------------
+        # Stage 6: force kill
+        # --------------------------------------------------------
+
+        print("[CANCEL] Router still active; force killing")
+
+        controller.router.kill()
+        self.router_restart_required.set()
+
