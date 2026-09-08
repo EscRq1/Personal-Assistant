@@ -487,41 +487,6 @@ class ResourceManager:
 
             return self._jina
 
-    # ============================================================
-    # Context manager helper
-    # ============================================================
-
-    class _Lease:
-        def __init__(self, manager, resource):
-            self.manager = manager
-            self.resource = resource
-
-        def __enter__(self):
-            return self.manager.acquire(self.resource)
-
-        def __exit__(self, exc_type, exc_value, traceback):
-            # Important:
-            # We intentionally DO NOT release here.
-            #
-            # Keeping the current model resident across consecutive
-            # calls avoids unnecessary model reloads.
-            return False
-
-    def use(self, resource: GPUResource | str):
-        """
-        Convenience helper:
-
-            with resources.use(GPUResource.OBSERVER):
-                ...
-
-        The context manager acquires the resource but does not
-        automatically unload it afterward. The next acquire() will
-        perform the switch.
-        """
-
-        return self._Lease(self, resource)
-
-
 
 resource_manager = ResourceManager()
 
