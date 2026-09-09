@@ -246,6 +246,14 @@ class Controller:
 
             elif kind == "done":
                 return
+            
+    #We need to kill the threads even if they are blocked once the cancel flag is set
+    #Otherwise the threads won't be closed and will occupy the ram, slowing down the machine
+
+    #Handles only those threads that are not working directly with inference engine since I implemented 
+    #a separate logic for llama termination
+
+    #Since CPython doesn't support proper threads termination, we should just let it run till the end and just void its result
 
     @staticmethod
     def _consume_background_task(task):
@@ -380,14 +388,13 @@ class Controller:
                 f"{iteration + 1}/{MAX_ITERATIONS}"
             )
 
-            # ----------------------------------------------------
             # State for THIS physical model generation.
-            # ----------------------------------------------------
+
 
             content_parts = []
             accumulated_tools = {}
 
-            # ----------------------------------------------------
+
             # IMPORTANT:
             #
             # Only lock the ResourceManager while this actual
@@ -399,7 +406,7 @@ class Controller:
             #
             # The worker owns the ResourceManager lock and releases it
             # before this function continues to tool execution.
-            # ----------------------------------------------------
+
 
             payload = {
                 "model": self.assistant_model,
@@ -411,19 +418,13 @@ class Controller:
                 "stream": True,
                 "cache_prompt": True,
 
-                # ==================================================
                 # TOOL CALLING
-                # ==================================================
 
                 "tools": self.tool_controller.get_available_tools(
                     web_enabled=web_enabled
                 ),
                 "tool_choice": "auto",
-
-                # Let llama.cpp parse the model's tool-call format.
                 "parse_tool_calls": True,
-
-                # Keep first test deterministic/simple.
                 "parallel_tool_calls": False,
             }
 
@@ -431,10 +432,7 @@ class Controller:
                 f"{Fore.CYAN}"
                 f"MODEL USED: Assistant"
             )
-
-            # ====================================================
-            # ONE PHYSICAL LLAMA.CPP GENERATION
-            # ====================================================
+            #Starting to stream tokens
             if ctx.cancel_event and ctx.cancel_event.is_set():
                 return
 
@@ -458,18 +456,17 @@ class Controller:
             if ctx.cancel_event.is_set():
                 return
 
-            # ========================================================
-            # PHYSICAL GENERATION IS FINISHED
-            #
+
+            # The decoding phase is either finished or inference engine detected tool calling
             # ResourceManager lock has now been released.
-            # ========================================================
+
 
             tool_calls = (
                 self.tool_controller.finalize_tool_calls(
                     accumulated_tools
                 )
             )
-
+            #Check if the coder has been called
             coder_calls = [
                 call
                 for call in tool_calls
@@ -498,7 +495,7 @@ class Controller:
                 task = arguments.get("task", "").strip()
                 context = arguments.get("context", "").strip()
                 tool_name = function.get("name", "")
-
+                #!!PRESERVED CODE!!
                 # if tool_name == "high_thinking":
                 #     mode = "high"
 
@@ -518,6 +515,9 @@ class Controller:
                     f"[AGENT] transferring control to coding model"
                 )
 
+                print(f"Generated task: {task}")
+
+                #Start the coding stream
                 async for token in self.callCoder(
                     task=task,
                     ctx = ctx,
@@ -530,11 +530,10 @@ class Controller:
 
                 return
             
-            # ========================================================
+
             # NO TOOL CALL
-            #
             # The model simply finished its answer.
-            # ========================================================
+
 
             if not tool_calls:
 
@@ -545,9 +544,8 @@ class Controller:
 
                 return
 
-            # ========================================================
+
             # TOOL CALL DETECTED
-            # ========================================================
 
             self.tool_controller.print_tool_batch(
                 tool_calls
@@ -557,9 +555,8 @@ class Controller:
                 content_parts
             )
 
-            # --------------------------------------------------------
+
             # Preserve the assistant's tool request.
-            # --------------------------------------------------------
 
             messages.append(
                 self.tool_controller.build_assistant_tool_message(
@@ -567,12 +564,6 @@ class Controller:
                     tool_calls=tool_calls,
                 )
             )
-
-            # --------------------------------------------------------
-            # Execute tools OUTSIDE the assistant lock.
-            #
-            # This is critical for the future Observer/RAG tools.
-            # --------------------------------------------------------
 
             if ctx.cancel_event.is_set():
                 return
@@ -585,6 +576,8 @@ class Controller:
 
             if results is None or ctx.cancel_event.is_set():
                 return
+            
+            #Handle very large chunks of web results
 
             results = await self._run_blocking_cancellable(
                 ctx,
@@ -595,9 +588,8 @@ class Controller:
             if results is None or ctx.cancel_event.is_set():
                 return
 
-            # --------------------------------------------------------
             # Append tool results to the same logical conversation.
-            # --------------------------------------------------------
+
 
             for result in results:
 
@@ -625,9 +617,10 @@ class Controller:
             "\n\n[Agent] Maximum tool-call iterations reached."
         )
 
-    
+    #Add some situation awareness context to the coder to avoid confusion when fusing 
+    #both models answers
+    @staticmethod
     def build_coding_context(
-        self,
         mode: str,
         tools: list[dict],
     ) -> str:
@@ -745,27 +738,24 @@ class Controller:
         The child streams its output directly to the UI.
         """
 
-        # ------------------------------------------------------------
+
         # Create an independent conversation for this reasoning tier.
-        # ------------------------------------------------------------
+
         messages = list(messages)
 
-        # ------------------------------------------------------------
         # Determine the tools actually available to THIS tier.
-        # ------------------------------------------------------------
 
         tools = self.tool_controller.get_coding_tools(
             mode=mode,
             web_enabled=websearch,
         )
 
-        # ------------------------------------------------------------
+
         # Add explicit delegation context.
         #
         # This is NOT another copy of memory.
         # The inherited system/user/context messages are already
         # present in `messages`.
-        # ------------------------------------------------------------
 
         messages.append({
             "role": "user",
@@ -781,9 +771,9 @@ class Controller:
             + (context or "(none provided)"),
         })
 
-        # ------------------------------------------------------------
+
         # Reasoning/tool loop.
-        # ------------------------------------------------------------
+
 
         for iteration in range(MAX_ITERATIONS):
 
@@ -810,13 +800,13 @@ class Controller:
                 f"{iteration + 1}/{MAX_ITERATIONS}"
             )
 
-            # --------------------------------------------------------
+
             # Model inference.
             #
             # The physical HTTP stream runs in a worker thread. This keeps
             # the asyncio event loop available for cancellation, Flask/SSE,
             # and other coroutine work.
-            # --------------------------------------------------------
+
 
             payload = {
                 "model": self.coder_model,
@@ -861,9 +851,8 @@ class Controller:
             if ctx.cancel_event.is_set():
                 return
 
-            # --------------------------------------------------------
-            # Generation finished.
-            # --------------------------------------------------------
+            # Decoding is finished.
+
 
             tool_calls = (
                 self.tool_controller.finalize_tool_calls(
@@ -1023,12 +1012,12 @@ class Controller:
 
                 return
 
-            # --------------------------------------------------------
+
             # Normal tools.
             #
             # Preserve the assistant's tool request, execute tools,
             # then append their results to THIS tier's conversation.
-            # --------------------------------------------------------
+
 
             self.tool_controller.print_tool_batch(
                 tool_calls
@@ -1283,7 +1272,7 @@ class Controller:
             if ctx.router_restart_required.is_set():
                 try:
                     # Let the worker that owned the killed HTTP request
-                    # finish unwinding before the router is restarted.
+                    # finish unwinding before the router is restarted
                     try:
                         await asyncio.wait_for(
                             asyncio.to_thread(ctx.llm_done.wait),
@@ -1332,19 +1321,14 @@ class Controller:
                 "error": "Internet connection unavailable."
             })
 
-        # --------------------------------------------------------
-        # 1. Observer turns Qwen's request into a search query.
-        # --------------------------------------------------------
-
 
         print(
             f"{Fore.CYAN}"
             f"[WEB] generated query: {request}"
         )
 
-        # --------------------------------------------------------
-        # 2. Raw web retrieval.
-        # --------------------------------------------------------
+        # Raw web retrieval
+
 
         raw_evidence = web_lookup(
             request,
@@ -1689,28 +1673,21 @@ class ToolController:
                     },
                 },
             )
-
-            # ------------------------------------------------
             # Tool-call ID
-            # ------------------------------------------------
 
             call_id = delta.get("id")
 
             if call_id:
                 call["id"] = call_id
 
-            # ------------------------------------------------
             # Tool-call type
-            # ------------------------------------------------
 
             call_type = delta.get("type")
 
             if call_type:
                 call["type"] = call_type
 
-            # ------------------------------------------------
             # Function fragments
-            # ------------------------------------------------
 
             function = (
                 delta.get("function")
@@ -1818,9 +1795,8 @@ class ToolController:
         if not web_results:
             return results
 
-        # --------------------------------------------------------
         # Collect all web evidence from this tool batch.
-        # --------------------------------------------------------
+
 
         sections = []
 
@@ -1867,9 +1843,9 @@ class ToolController:
             f"~{token_estimate} tokens"
         )
 
-        # --------------------------------------------------------
+
         # Below trigger → leave it alone.
-        # --------------------------------------------------------
+
 
         if token_estimate <= 8000:
             return results
@@ -1880,19 +1856,17 @@ class ToolController:
             f"~{token_estimate} tokens"
         )
 
-        # --------------------------------------------------------
+
         # HARD INPUT CAP FOR THE COMPRESSOR
-        #
         # Never feed an arbitrarily large web corpus to Observer.
-        # --------------------------------------------------------
+
 
         hard_chars = 96000
 
         compressed_input = combined[:hard_chars]
 
-        # --------------------------------------------------------
+
         # ONE Observer compression pass.
-        # --------------------------------------------------------
 
         summary_prompt = (
             "Compress the following external web evidence into "
@@ -1945,14 +1919,14 @@ class ToolController:
             )
             return results
 
-        # --------------------------------------------------------
+
         # Replace the raw evidence in each web result with a
         # compact representation.
-        #
+
         # We preserve every original tool_call_id because the
         # OpenAI-compatible protocol requires one tool message
         # corresponding to each tool call.
-        # --------------------------------------------------------
+
 
         first = True
         output = []
@@ -2211,14 +2185,14 @@ class ExecutionContext:
         terminate_timeout=0.5,
     ):
         """
-        Multi-stage cancellation watchdog.
+        Multi-stage cancellation watchdog:\n
 
-        Stage 1: the normal pipeline sees cancel_event.
-        Stage 2: close the active HTTP response.
-        Stage 3: give the request a short grace period.
-        Stage 4: SIGTERM the llama router.
-        Stage 5: give router termination a short grace period.
-        Stage 6: SIGKILL the router if it is still alive.
+        Stage 1: the normal pipeline sees cancel_event\n
+        Stage 2: close the active HTTP response\n
+        Stage 3: give the request a short grace period\n
+        Stage 4: SIGTERM the llama router\n
+        Stage 5: give router termination a short grace period\n
+        Stage 6: SIGKILL the router if it is still alive\n
         """
 
         # The actual blocking LLM/web/tool work is now off the asyncio
@@ -2227,14 +2201,14 @@ class ExecutionContext:
         while not self.cancel_event.is_set():
             await asyncio.sleep(0.02)
 
-        print("[CANCEL] Cancellation requested")
+        print(f"{Fore.RED}[CANCEL] Cancellation requested")
 
         # Cancellation during a blocking tool/web operation does not have a
         # safe way to kill its Python worker thread. The async side will stop
         # waiting for that result and unwind. An active LLM request, however,
         # can be terminated at the router-process level.
         if not self.llm_active.is_set():
-            print("[CANCEL] No active LLM request")
+            print(f"{Fore.RED}[CANCEL] No active LLM request")
             return
 
         # --------------------------------------------------------
@@ -2254,7 +2228,7 @@ class ExecutionContext:
                 timeout=graceful_timeout,
             )
 
-            print("[CANCEL] HTTP request stopped gracefully")
+            print(f"{Fore.RED}[CANCEL] HTTP request stopped gracefully")
             return
 
         except asyncio.TimeoutError:
@@ -2264,7 +2238,7 @@ class ExecutionContext:
         # Stage 4: terminate router
         # --------------------------------------------------------
 
-        print("[CANCEL] HTTP request still active; terminating router")
+        print(f"{Fore.RED}[CANCEL] HTTP request still active; terminating router")
 
         controller.router.terminate()
         self.router_restart_required.set()
@@ -2275,7 +2249,7 @@ class ExecutionContext:
                 timeout=terminate_timeout,
             )
 
-            print("[CANCEL] Router termination stopped inference")
+            print(f"{Fore.RED}[CANCEL] Router termination stopped inference")
             return
 
         except asyncio.TimeoutError:
@@ -2285,7 +2259,7 @@ class ExecutionContext:
         # Stage 6: force kill
         # --------------------------------------------------------
 
-        print("[CANCEL] Router still active; force killing")
+        print(f"{Fore.RED}[CANCEL] Router still active; force killing")
 
         controller.router.kill()
         self.router_restart_required.set()
