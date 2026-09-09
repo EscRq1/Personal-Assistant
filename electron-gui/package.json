@@ -1,16 +1,13 @@
 {
-  "name": "electron-gui",
+  "name": "assistant",
   "version": "1.0.0",
+  "description": "Complete Multi-Agent Assistant Application",
   "main": "main.js",
-  "private": true,
   "scripts": {
     "start": "electron ."
   },
+  "type": "commonjs",
   "devDependencies": {
-    "electron": "^40.2.1"
-  },
-  "dependencies": {
-    "marked": "^17.0.1",
-    "python-shell": "^5.0.0"
+    "electron": "^43.4.1"
   }
 }
