@@ -121,7 +121,7 @@ async function loadSidebarHistory() {
             menuButton.dataset.id = id;
             menuButton.setAttribute("aria-label", "Chat menu");
             const icon = document.createElement("img");
-            icon.src = "./assets/ellipsis-vertical-solid-full.svg";
+            icon.src = "../../assets/ellipsis-vertical-solid-full.svg";
             icon.alt = "";
             menuButton.appendChild(icon);
 
@@ -477,7 +477,7 @@ function clearInputUI() {
 function setGenerationUI(active) {
     isGenerating = active;
     if (active) {
-        controlImg.src = "./assets/square-solid-full.svg";
+        controlImg.src = "../../assets/square-solid-full.svg";
         controlBtn.style.setProperty("--snippet", '"Stop answering"');
         controlBtn.disabled = isStopping;
         ain.disabled = false;
@@ -485,7 +485,7 @@ function setGenerationUI(active) {
         toggleInput.disabled = true;
         controlBtn.onclick = stopAnswering;
     } else {
-        controlImg.src = "./assets/arrow-right-long-solid-full.svg";
+        controlImg.src = "../../assets/arrow-right-long-solid-full.svg";
         controlBtn.style.setProperty("--snippet", '"Send message"');
         controlBtn.disabled = false;
         ain.disabled = imgBtn.disabled = toggleInput.disabled = isSaving || isStopping;
@@ -632,9 +632,6 @@ async function sendMessage() {
         finishGeneration(generationId);
         if (controller.signal.aborted || generationId !== currentGenerationId || isStopping) return;
 
-        await loadSidebarHistory();
-        if (controller.signal.aborted || generationId !== currentGenerationId) return;
-
         try {
             const sumRes = await fetch(`${API}/sum`, { method: "POST" });
             if (!sumRes.ok) throw new Error(`Summary request failed: ${sumRes.status}`);
@@ -692,7 +689,7 @@ async function stopAnswering() {
     currentAbortController = null;
     isGenerating = false;
     controlBtn.disabled = true;
-    controlImg.src = "./assets/square-solid-full.svg";
+    controlImg.src = "../../assets/square-solid-full.svg";
     controlBtn.style.setProperty("--snippet", '"Stopping..."');
 
     void fetch(`${API}/stop`, { method: "POST", keepalive: true }).catch(error => {
