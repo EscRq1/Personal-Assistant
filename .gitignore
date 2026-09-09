@@ -1,8 +1,9 @@
 *.log
 *.ini
 memory_db/
+memory_db(copy)/
 __pycache__/
 node_modules/
-venv/
+.venv/
 memory_images/
-
+    

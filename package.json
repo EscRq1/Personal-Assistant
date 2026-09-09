@@ -1,0 +1,24 @@
+{
+  "name": "assistant",
+  "version": "1.0.0",
+  "description": "Complete Multi-Agent Assistant Application",
+  "main": "electron-gui/main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EscRq1/Complete-Multi-Agent-Assistant-Application.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/EscRq1/Complete-Multi-Agent-Assistant-Application/issues"
+  },
+  "homepage": "https://github.com/EscRq1/Complete-Multi-Agent-Assistant-Application#readme",
+  "devDependencies": {
+    "electron": "^43.4.1"
+  }
+}

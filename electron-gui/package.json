@@ -2,7 +2,7 @@
   "name": "assistant",
   "version": "1.0.0",
   "description": "Complete Multi-Agent Assistant Application",
-  "main": "main.js",
+  "main": "src/javascript/main.js",
   "scripts": {
     "start": "electron ."
   },

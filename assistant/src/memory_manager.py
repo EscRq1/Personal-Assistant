@@ -55,7 +55,7 @@ class MemoryManager:
     def __init__(self, db_path=None):
         if db_path is None:
             base = os.path.dirname(os.path.abspath(__file__))
-            db_path = os.path.join(base, "memory_db")
+            db_path = os.path.join(base, "../memory_db")
 
         self.persist_directory = db_path
 

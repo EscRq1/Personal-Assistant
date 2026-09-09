@@ -24,6 +24,10 @@ CORS(app)
 # Initialize Colorama for terminal colors.
 init(autoreset=True)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MEMORY_IMAGES_DIR = os.path.abspath(
+    os.path.join(BASE_DIR, "../memory_images")
+)
 
 class Main:
 
@@ -376,7 +380,7 @@ class Main:
             )
 
             os.makedirs(
-                "memory_images",
+                MEMORY_IMAGES_DIR,
                 exist_ok=True,
             )
 
@@ -393,7 +397,7 @@ class Main:
 
                 with open(
                     os.path.join(
-                        "memory_images",
+                        MEMORY_IMAGES_DIR,
                         img_id,
                     ),
                     "wb",
@@ -1025,7 +1029,7 @@ def finalize_session(chat_id=None):
         # --------------------------------------------------------
         # Expensive call #1: summary
         # --------------------------------------------------------
-
+        
         generated = assistant.make_chat_summary(
             summary_transcript
         )
@@ -1184,6 +1188,8 @@ def get_history():
 
         history_list = []
 
+
+
         ids = data.get("ids") or []
         metadatas = data.get("metadatas") or []
 
@@ -1231,6 +1237,7 @@ def get_history():
 
         # Pinned first.
         # Newest/most recently updated within each group.
+
         history_list.sort(
             key=lambda item: (
                 item["pinned"],
@@ -1423,7 +1430,7 @@ def shutdown_session():
 def get_image(name):
 
     return send_from_directory(
-        "memory_images",
+        MEMORY_IMAGES_DIR,
         name,
     )
 
@@ -1503,6 +1510,8 @@ def rename_chat():
 # ================================================================
 # Pin
 # ================================================================
+
+
 
 @app.route("/pin", methods=["POST"])
 def pin_chat():
