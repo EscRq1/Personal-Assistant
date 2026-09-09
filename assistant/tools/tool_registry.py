@@ -195,10 +195,21 @@ TOOLS = [
         "function": {
             "name": "call_coder",
             "description": (
-                "Delegate a programming or software-engineering task to the "
-                "dedicated coding specialist. Use this for difficult code "
-                "analysis, debugging, implementation, refactoring, architecture, "
-                "or other tasks that benefit from a dedicated coding model."
+                "Delegate programming and software-engineering work to the "
+                "dedicated coding specialist. IMPORTANT: If the user's request "
+                "involves writing, modifying, debugging, analyzing, explaining, "
+                "reviewing, refactoring, optimizing, or designing code or a "
+                "software system, prefer calling this tool rather than solving "
+                "the coding task yourself. This includes code errors, stack "
+                "traces, compiler/build errors, runtime errors, API integration, "
+                "architecture, algorithms, implementation details, performance "
+                "problems, configuration issues, and code-related technical "
+                "questions. The task does NOT need to be difficult or complex "
+                "to justify delegation. Call the coder whenever the core of the "
+                "user's request is a programming or software-engineering problem. "
+                "Do not call it for purely conceptual questions unrelated to "
+                "implementing or debugging software, or for ordinary non-technical "
+                "requests."
             ),
             "parameters": {
                 "type": "object",
@@ -206,15 +217,20 @@ TOOLS = [
                     "task": {
                         "type": "string",
                         "description": (
-                            "The concrete programming task the coding specialist "
-                            "must solve."
+                            "The exact programming or software-engineering task "
+                            "the coding specialist should solve. State what needs "
+                            "to be implemented, debugged, analyzed, changed, or "
+                            "explained and what the expected result is."
                         ),
                     },
                     "context": {
                         "type": "string",
                         "description": (
-                            "Relevant code, logs, requirements, constraints, "
-                            "errors, or other technical context."
+                            "All relevant technical context available to the "
+                            "specialist, including source code, error messages, "
+                            "stack traces, logs, environment details, APIs, "
+                            "requirements, constraints, attempted solutions, "
+                            "and relevant previous discussion."
                         ),
                     },
                 },
