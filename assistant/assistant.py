@@ -3,6 +3,7 @@ import json
 import threading
 import asyncio
 from contextvars import ContextVar
+import socket
 
 
 from tools.web_search import (
@@ -137,6 +138,7 @@ class Controller:
                     timeout=self.request_timeout,
                 )
 
+
                 ctx.set_response(response)
                 response.raise_for_status()
 
@@ -173,6 +175,7 @@ class Controller:
                             queue,
                             ("token", token),
                         )
+                        ctx.llm_phase = "decode"
 
                     tool_deltas = delta.get("tool_calls")
 
@@ -2141,6 +2144,7 @@ class ExecutionContext:
         self.llm_active = threading.Event()
         self.llm_done = threading.Event()
         self.llm_done.set()
+        self.llm_phase = ""
 
         # Currently active requests.Response object, when available.
         self._response = None
@@ -2153,11 +2157,13 @@ class ExecutionContext:
     def begin_llm(self):
         self.llm_done.clear()
         self.llm_active.set()
+        self.llm_phase = "prefill"
 
     def end_llm(self):
         self.llm_active.clear()
         self.llm_done.set()
         self.clear_response()
+        self.llm_phase = "idle"
 
     def set_response(self, response):
         with self._response_lock:
@@ -2168,15 +2174,33 @@ class ExecutionContext:
             if response is None or self._response is response:
                 self._response = None
 
-    def close_response(self):
+    
+    def abort_response_socket(self):
+        """
+        Killing an active TCP socket between worker thread and inference engine
+        created by HTTP request to the later to avoid shared resources contention
+        between worker and watchdog threads and the blockage of abortion logic
+        """
         with self._response_lock:
             response = self._response
 
-        if response is not None:
-            try:
-                response.close()
-            except Exception:
-                pass
+        if response is None:
+            return
+
+        try:
+            raw = response.raw
+            conn = getattr(raw, "_connection", None)
+
+            sock = getattr(conn, "sock", None)
+
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        except Exception as e:
+            print(f"[CANCEL] socket shutdown failed: {e}")
 
     async def abort_event_observer(
         self,
@@ -2211,16 +2235,28 @@ class ExecutionContext:
             print(f"{Fore.RED}[CANCEL] No active LLM request")
             return
 
-        # --------------------------------------------------------
         # Stage 2: close active HTTP response
-        # --------------------------------------------------------
 
-        print("[CANCEL] Closing active HTTP response")
-        self.close_response()
 
-        # --------------------------------------------------------
+        print(f"{Fore.RED}[CANCEL] Closing active HTTP response")
+        self.abort_response_socket()
+
+        #SPECIAL CASE(prefill/observer call)
+        #Since llama.cpp stops tracking status of http requests during prefill
+        #phase, we should force kill llama instead of waiting for end of prompt processing
+        #Especially critical when the input prompt is large(10k+ tokens)
+        #Also, since observer does not stream its tokens but output a complete JSON,
+        #it is impossible to dynamically track the phase and abort generation
+        #So the only way to abort active observer generation is to terminate the llama server
+
+        if (self.llm_phase == "prefill" or
+        controller.resources.current_owner == "observer"):
+            controller.router.kill()
+            self.router_restart_required.set()
+            return
+            
+
         # Stage 3: graceful request unwind
-        # --------------------------------------------------------
 
         try:
             await asyncio.wait_for(
@@ -2234,9 +2270,9 @@ class ExecutionContext:
         except asyncio.TimeoutError:
             pass
 
-        # --------------------------------------------------------
+
         # Stage 4: terminate router
-        # --------------------------------------------------------
+
 
         print(f"{Fore.RED}[CANCEL] HTTP request still active; terminating router")
 
@@ -2255,9 +2291,9 @@ class ExecutionContext:
         except asyncio.TimeoutError:
             pass
 
-        # --------------------------------------------------------
+
         # Stage 6: force kill
-        # --------------------------------------------------------
+
 
         print(f"{Fore.RED}[CANCEL] Router still active; force killing")
 
