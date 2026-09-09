@@ -1,8 +1,13 @@
 {
   "name": "electron-gui",
   "version": "1.0.0",
+<<<<<<< HEAD
   "main": "main.js",
   "private": true,
+=======
+  "description": "Complete Multi-Agent Assistant Application",
+  "main": "src/javascript/main.js",
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline)
   "scripts": {
     "start": "electron ."
   },

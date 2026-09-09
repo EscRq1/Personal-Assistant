@@ -164,6 +164,7 @@ async function loadSidebarHistory() {
                 ? "1"
                 : "0";
 
+<<<<<<< HEAD:electron-gui/index.js
             div.insertAdjacentHTML("afterbegin", `
                 <p>
                     ${
@@ -192,6 +193,16 @@ async function loadSidebarHistory() {
 
                 header.innerText =
                     item.title || "Legacy Chat";
+=======
+            const menuButton = document.createElement("button");
+            menuButton.className = "menu-btn";
+            menuButton.dataset.id = id;
+            menuButton.setAttribute("aria-label", "Chat menu");
+            const icon = document.createElement("img");
+            icon.src = "../../assets/ellipsis-vertical-solid-full.svg";
+            icon.alt = "";
+            menuButton.appendChild(icon);
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):electron-gui/src/javascript/index.js
 
                 header.style.setProperty(
                     "--snippet",
@@ -722,6 +733,64 @@ function appendMessage(outputDiv, role, content = "") {
     return textElement;
 }
 
+<<<<<<< HEAD:electron-gui/index.js
+=======
+function flushAssistantRender() {
+    if (assistantRenderFrame !== null) {
+        cancelAnimationFrame(assistantRenderFrame);
+        assistantRenderFrame = null;
+    }
+    const pending = pendingAssistantRender;
+    pendingAssistantRender = null;
+    if (!pending || pending.generationId !== currentGenerationId) return;
+    updateMessage(pending.element, "assistant", pending.content);
+    outputDiv.scrollTop = outputDiv.scrollHeight;
+}
+
+function revokeObjectURL(url) {
+    if (!url) return;
+    try { URL.revokeObjectURL(url); } catch {}
+}
+
+function clearInputUI() {
+    ain.value = "";
+    ain.style.height = "auto";
+    ain.style.overflowY = "hidden";
+    attachmentTray.querySelectorAll(".attachment-item[data-object-url]").forEach(item => {
+        revokeObjectURL(item.dataset.objectUrl);
+    });
+    attachmentTray.replaceChildren();
+    imgInput.value = "";
+    pendingImages = [];
+}
+
+function setGenerationUI(active) {
+    isGenerating = active;
+    if (active) {
+        controlImg.src = "../../assets/square-solid-full.svg";
+        controlBtn.style.setProperty("--snippet", '"Stop answering"');
+        controlBtn.disabled = isStopping;
+        ain.disabled = false;
+        imgBtn.disabled = true;
+        toggleInput.disabled = true;
+        controlBtn.onclick = stopAnswering;
+    } else {
+        controlImg.src = "../../assets/arrow-right-long-solid-full.svg";
+        controlBtn.style.setProperty("--snippet", '"Send message"');
+        controlBtn.disabled = false;
+        ain.disabled = imgBtn.disabled = toggleInput.disabled = isSaving || isStopping;
+        controlBtn.onclick = send;
+    }
+}
+
+function finishGeneration(generationId) {
+    if (generationId !== currentGenerationId) return false;
+    flushAssistantRender();
+    currentAbortController = null;
+    setGenerationUI(false);
+    return true;
+}
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):electron-gui/src/javascript/index.js
 
 async function sendMessage() {
     const query = ain.value.trim();
@@ -889,10 +958,13 @@ async function sendMessage() {
         }
 
 
+<<<<<<< HEAD:electron-gui/index.js
         // refresh sidebar
         await loadSidebarHistory();
 
         // refresh tooltip summary
+=======
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):electron-gui/src/javascript/index.js
         try {
             const sumRes = await fetch("http://localhost:5000/sum", { method: "POST" });
             const summaryBlock = await sumRes.json();
@@ -914,8 +986,48 @@ async function sendMessage() {
     }
 }
 
+<<<<<<< HEAD:electron-gui/index.js
 // --- image button ---
 imgBtn.addEventListener("click", () => imgInput.click());
+=======
+function send() {
+    if (isBusy()) return;
+    void sendMessage();
+}
+
+async function stopAnswering() {
+    if (!isGenerating || isStopping) return;
+
+    const controller = currentAbortController;
+    if (!controller) {
+        isGenerating = false;
+        isStopping = false;
+        setGenerationUI(false);
+        return;
+    }
+
+    isStopping = true;
+    ++currentGenerationId;
+    currentAbortController = null;
+    isGenerating = false;
+    controlBtn.disabled = true;
+    controlImg.src = "../../assets/square-solid-full.svg";
+    controlBtn.style.setProperty("--snippet", '"Stopping..."');
+
+    void fetch(`${API}/stop`, { method: "POST", keepalive: true }).catch(error => {
+        console.warn("Backend stop request failed:", error);
+    });
+
+    try { controller.abort(); } catch {}
+    isStopping = false;
+    setGenerationUI(false);
+}
+
+imgBtn.addEventListener("click", () => {
+    if (isBusy()) return;
+    imgInput.click();
+});
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):electron-gui/src/javascript/index.js
 
 // --- tray helper ---
 function addToTray(files) {

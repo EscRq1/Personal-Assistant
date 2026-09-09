@@ -21,6 +21,10 @@ CORS(app)  # Allows Electron to talk to it
 # Initialize Colorama for Windows terminal colors
 init(autoreset=True)
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+MEMORY_IMAGES_DIR = os.path.abspath(
+    os.path.join(BASE_DIR, "../memory_images")
+)
 
 class Main:
     def __init__(self):
@@ -195,7 +199,19 @@ class Main:
         if images and len(images) > 0:
             print(f"{Fore.MAGENTA}[Vision] Image detected.")
 
+<<<<<<< HEAD:assistant/main.py
             os.makedirs("memory_images", exist_ok=True)
+=======
+            print(
+                f"{Fore.MAGENTA}"
+                "[Vision] Image detected."
+            )
+
+            os.makedirs(
+                MEMORY_IMAGES_DIR,
+                exist_ok=True,
+            )
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
 
             for img_bytes in images:
                 images_b64.append(
@@ -205,8 +221,16 @@ class Main:
                 img_id = f"{uuid.uuid4()}.png"
 
                 with open(
+<<<<<<< HEAD:assistant/main.py
                     os.path.join("memory_images", img_id),
                     "wb"
+=======
+                    os.path.join(
+                        MEMORY_IMAGES_DIR,
+                        img_id,
+                    ),
+                    "wb",
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
                 ) as f:
                     f.write(img_bytes)
 
@@ -458,8 +482,19 @@ def finalize_session(chat_id=None):
                 print(f"[Finalize]: Could not load existing metadata: {e}")
                 effective_chat_id = None
 
+<<<<<<< HEAD:assistant/main.py
         # Expensive call #1: final sidebar title/snippet.
         generated = assistant.make_chat_summary(full_transcript)
+=======
+        # --------------------------------------------------------
+        # Expensive call #1: summary
+        # --------------------------------------------------------
+        
+        generated = assistant.make_chat_summary(
+            summary_transcript
+        )
+
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
         if not isinstance(generated, dict):
             generated = {}
 
@@ -526,6 +561,12 @@ def get_history():
     try:
         data = assistant.memory.history.get(include=["metadatas"])
         history_list = []
+<<<<<<< HEAD:assistant/main.py
+=======
+
+
+
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
         ids = data.get("ids") or []
         metadatas = data.get("metadatas") or []
 
@@ -546,7 +587,13 @@ def get_history():
                 "timestamp": timestamp,
             })
 
+<<<<<<< HEAD:assistant/main.py
         # Pinned chats first. Within each group, newest/most recently updated first.
+=======
+        # Pinned first.
+        # Newest/most recently updated within each group.
+
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
         history_list.sort(
             key=lambda item: (item["pinned"], item["timestamp"]),
             reverse=True,
@@ -603,7 +650,20 @@ def shutdown_session():
 
 @app.route("/image/<name>")
 def get_image(name):
+<<<<<<< HEAD:assistant/main.py
     return send_from_directory("memory_images", name)
+=======
+
+    return send_from_directory(
+        MEMORY_IMAGES_DIR,
+        name,
+    )
+
+
+# ================================================================
+# Delete
+# ================================================================
+>>>>>>> b57cc20 (Repo structure redesign + Fixed critical sidebar updating logic flow resulted in long delays between Flash-Electron requests + Fixed bugs in image pipeline):assistant/src/main.py
 
 @app.route("/delete", methods=["POST"])
 def delete():
@@ -629,6 +689,8 @@ def rename_chat():
     if not ok:
         return jsonify({"status": "error"}), 400
     return jsonify({"status": "success"}), 200
+
+
 
 @app.route("/pin", methods=["POST"])
 def pin_chat():
