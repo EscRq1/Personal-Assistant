@@ -117,7 +117,6 @@ class Controller:
         """
 
         response = None
-
         # The ResourceManager lock belongs around the physical inference
         # request. The lock is intentionally acquired inside this worker
         # thread, not across an asyncio await.
@@ -417,6 +416,13 @@ class Controller:
 
                 "temperature": target_temp,
                 "max_tokens": -1,
+
+                "chat_template_kwargs": {
+                    "reasoning_effort": ctx.assistant_thinking_mode,
+                    
+                },
+
+                "reasoning_budget_tokens": ctx.assistant_thinking_budget,
 
                 "stream": True,
                 "cache_prompt": True,
@@ -816,6 +822,12 @@ class Controller:
                 "messages": messages,
 
                 "temperature": 0.2,
+
+                "chat_template_kwargs": {
+                    "reasoning_effort": ctx.coder_thinking_mode,
+                },
+
+                "reasoning_budget_tokens": ctx.coder_thinking_budget,
 
                 "stream": True,
                 "cache_prompt": True,
@@ -2153,6 +2165,11 @@ class ExecutionContext:
         # Set when cancellation forced router termination. The top-level
         # ask() cleanup restarts it after the current logical request unwinds.
         self.router_restart_required = threading.Event()
+
+        self.assistant_thinking_mode = ""
+        self.assistant_thinking_budget = None
+        self.coder_thinking_mode = ""
+        self.coder_thinking_budget = None
 
     def begin_llm(self):
         self.llm_done.clear()

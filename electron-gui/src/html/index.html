@@ -39,7 +39,55 @@
         <section class="header">
             <p class="summary" id="sum-header">New chat</p>
 
+            <div class="header-menu-wrap">
+                <button class="header-menu-btn" id="header-menu-btn"
+                        aria-label="App menu" aria-haspopup="true" aria-expanded="false">
+                    <!-- reuses an asset you already ship -->
+                    <img src="../../assets/ellipsis-vertical-solid-full.svg" alt="">
+                </button>
+
+                <div class="header-menu" id="header-menu" aria-label="App menu">
+                    <div class="header-menu-section">
+                        <p class="header-menu-label">Assistant:</p>
+                        <span class="select-container" style="--snippet:'Choose thinking mode'">
+                            <select class="header-menu-select" id="hm-assist-1" aria-label="Assistant mode">
+                                <option value="low" selected>Flash</option>
+                                <option value="medium">Thinking</option>
+                                <option value="high">Deep</option>
+                            </select>
+                        </span>
+                        <span class="select-container" style="--snippet:'Set thinking budget'">
+                            <select class="header-menu-select" id="hm-assist-2" aria-label="Assistant thinking budget">
+                                <option value="1024" selected>1024</option>
+                                <option value="4096">4096</option>
+                                <option value="-1">Unlimited</option>
+                            </select>
+                        </span>
+                    </div>
+
+                    <div class="header-menu-sep"></div>
+
+                    <div class="header-menu-section">
+                        <p class="header-menu-label">Coder:</p>
+                        <span class="select-container" style="--snippet:'Choose thinking mode'">
+                            <select class="header-menu-select" id="hm-coder-1" aria-label="Coder mode" style="margin-left: 18px;">
+                                <option value="low">Flash</option>
+                                <option value="medium" selected>Thinking</option>
+                                <option value="xhigh">Deep</option>
+                            </select>
+                        </span>
+                        <span class="select-container" style="--snippet:'Set thinking budget'">
+                            <select class="header-menu-select" id="hm-coder-2" aria-label="Coder thinking budget">
+                                <option value="1024">1024</option>
+                                <option value="4096" selected>8192</option>
+                                <option value="-1">Unlimited</option>
+                            </select>
+                        </span>
+                    </div>
+                </div>
+            </div>
         </section>
+
         <section class="content">
             <section class="filler">
                 <div id="chat-menu" class="chat-menu">
