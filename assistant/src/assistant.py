@@ -417,12 +417,8 @@ class Controller:
                 "temperature": target_temp,
                 "max_tokens": -1,
 
-                "chat_template_kwargs": {
-                    "reasoning_effort": ctx.assistant_thinking_mode,
-                    
-                },
-
-                "reasoning_budget_tokens": ctx.assistant_thinking_budget,
+                "reasoning_effort": ctx.assistant_thinking_mode,
+                "thinking_budget_tokens": ctx.assistant_thinking_budget,
 
                 "stream": True,
                 "cache_prompt": True,
@@ -823,11 +819,10 @@ class Controller:
 
                 "temperature": 0.2,
 
-                "chat_template_kwargs": {
-                    "reasoning_effort": ctx.coder_thinking_mode,
-                },
+                
+                "reasoning_effort": ctx.coder_thinking_mode,
+                "thinking_budget_tokens": ctx.coder_thinking_budget,
 
-                "reasoning_budget_tokens": ctx.coder_thinking_budget,
 
                 "stream": True,
                 "cache_prompt": True,

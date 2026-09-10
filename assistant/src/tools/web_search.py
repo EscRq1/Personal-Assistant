@@ -8,17 +8,20 @@ from urllib.parse import urlparse
 
 HEADERS = {
     "User-Agent": (
-        "MyPythonAssistant/1.0 "
-        "(A student's pet project; "
-        "contact: https://github.com/EscRq1)"
-    )
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/124.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Referer": "https://duckduckgo.com/",
 }
 
 # ------------------------------------------------------------
 # Safety / resource limits
 # ------------------------------------------------------------
 
-REQUEST_TIMEOUT = 5
+REQUEST_TIMEOUT = 10
 CONNECTIVITY_TIMEOUT = 2
 
 MAX_RESULTS = 5
@@ -41,14 +44,12 @@ def is_safe_url(url: str) -> bool:
     Only HTTP/HTTPS URLs are allowed.
 
     Hostnames resolving to local/private/reserved addresses
-    are rejected to prevent SSRF against the local machine
-    or private networks.
+    are rejected to reduce SSRF risk.
     """
 
     try:
         parsed = urlparse(url)
 
-        # Only normal web protocols.
         if parsed.scheme not in ("http", "https"):
             return False
 
@@ -57,8 +58,6 @@ def is_safe_url(url: str) -> bool:
         if not hostname:
             return False
 
-        # Resolve the hostname ourselves so we can inspect
-        # the actual destination IP addresses.
         addresses = socket.getaddrinfo(
             hostname,
             None,
@@ -69,11 +68,8 @@ def is_safe_url(url: str) -> bool:
             return False
 
         for address in addresses:
-            ip = ipaddress.ip_address(
-                address[4][0]
-            )
+            ip = ipaddress.ip_address(address[4][0])
 
-            # Reject anything that is not a normal public address.
             if (
                 ip.is_private
                 or ip.is_loopback
@@ -108,10 +104,9 @@ def search_web(
 
     results = []
 
-    # Never allow callers to silently override our upper bound.
-    max_results = min(
-        max_results,
-        MAX_RESULTS,
+    max_results = max(
+        1,
+        min(max_results, MAX_RESULTS),
     )
 
     with DDGS() as ddgs:
@@ -135,11 +130,12 @@ def fetch_page_text(
     """
     Fetch and clean webpage text.
 
-    Only public HTTP/HTTPS destinations are allowed.
+    Redirects are followed, but the final destination is
+    validated before its content is accepted.
     """
 
     # --------------------------------------------------------
-    # Validate URL before making a request.
+    # Validate initial URL before making a request.
     # --------------------------------------------------------
 
     if not is_safe_url(url):
@@ -153,8 +149,29 @@ def fetch_page_text(
             url,
             timeout=REQUEST_TIMEOUT,
             headers=HEADERS,
-            allow_redirects=False,
+            allow_redirects=True,
         )
+
+        # ----------------------------------------------------
+        # Validate the final redirect destination.
+        # ----------------------------------------------------
+
+        final_url = response.url
+
+        if final_url != url:
+            print(
+                f"[WEB] Redirected: {url} -> {final_url}"
+            )
+
+        if not is_safe_url(final_url):
+            print(
+                f"[WEB] Blocked unsafe redirect: {final_url}"
+            )
+            return ""
+
+        # ----------------------------------------------------
+        # Raise for HTTP errors.
+        # ----------------------------------------------------
 
         response.raise_for_status()
 
@@ -170,7 +187,9 @@ def fetch_page_text(
             try:
                 if int(content_length) > MAX_RESPONSE_BYTES:
                     print(
-                        f"[WEB] Response too large: {url}"
+                        f"[WEB] Response too large: "
+                        f"{final_url} "
+                        f"({content_length} bytes)"
                     )
                     return ""
 
@@ -179,7 +198,9 @@ def fetch_page_text(
 
         if len(response.content) > MAX_RESPONSE_BYTES:
             print(
-                f"[WEB] Response exceeded byte limit: {url}"
+                f"[WEB] Response exceeded byte limit: "
+                f"{final_url} "
+                f"({len(response.content)} bytes)"
             )
             return ""
 
@@ -193,7 +214,14 @@ def fetch_page_text(
         )
 
         for tag in soup(
-            ["script", "style", "nav", "footer"]
+            [
+                "script",
+                "style",
+                "nav",
+                "footer",
+                "header",
+                "noscript",
+            ]
         ):
             tag.decompose()
 
@@ -203,16 +231,50 @@ def fetch_page_text(
 
         return text[:max_chars]
 
+    except requests.HTTPError as exc:
+        status = (
+            exc.response.status_code
+            if exc.response is not None
+            else "unknown"
+        )
+
+        reason = (
+            exc.response.reason
+            if exc.response is not None
+            else ""
+        )
+
+        print(
+            f"[WEB] HTTP {status}"
+            f"{f' ({reason})' if reason else ''}: "
+            f"{url}"
+        )
+        return ""
+
+    except requests.Timeout:
+        print(
+            f"[WEB] Request timed out: {url}"
+        )
+        return ""
+
+    except requests.ConnectionError as exc:
+        print(
+            f"[WEB] Connection failed: "
+            f"{url} ({type(exc).__name__})"
+        )
+        return ""
+
     except requests.RequestException as exc:
         print(
-            f"[WEB] Request failed: {url} "
-            f"({type(exc).__name__})"
+            f"[WEB] Request failed: "
+            f"{url} ({type(exc).__name__}: {exc})"
         )
         return ""
 
     except Exception as exc:
         print(
-            f"[WEB] Page processing failed: {url} "
+            f"[WEB] Page processing failed: "
+            f"{url} "
             f"({type(exc).__name__}: {exc})"
         )
         return ""
@@ -225,6 +287,9 @@ def fetch_page_text(
 def is_online():
     """
     Cheap connectivity check.
+
+    This is only a quick network sanity check; the actual
+    web request remains authoritative.
     """
 
     try:
@@ -261,20 +326,23 @@ def web_lookup(
         )
         return ""
 
+    # --------------------------------------------------------
     # Enforce global limits regardless of caller input.
-    max_results = min(
-        max_results,
-        MAX_RESULTS,
+    # --------------------------------------------------------
+
+    max_results = max(
+        1,
+        min(max_results, MAX_RESULTS),
     )
 
-    page_chars = min(
-        page_chars,
-        MAX_PAGE_CHARS,
+    page_chars = max(
+        1,
+        min(page_chars, MAX_PAGE_CHARS),
     )
 
-    total_chars = min(
-        total_chars,
-        MAX_TOTAL_CHARS,
+    total_chars = max(
+        1,
+        min(total_chars, MAX_TOTAL_CHARS),
     )
 
     print(
@@ -288,6 +356,17 @@ def web_lookup(
         search_results = search_web(
             query,
             max_results=max_results,
+        )
+
+        if not search_results:
+            print(
+                "[WEB] Search returned no results."
+            )
+            return ""
+
+        print(
+            f"[WEB] Search returned "
+            f"{len(search_results)} result(s)"
         )
 
         for result in search_results:
@@ -339,8 +418,10 @@ def web_lookup(
             if remaining <= 0:
                 break
 
-            # Don't allow the final chunk to push the
-            # global evidence buffer over its limit.
+            # ------------------------------------------------
+            # Keep final evidence buffer within its limit.
+            # ------------------------------------------------
+
             if len(chunk) > remaining:
                 chunk = chunk[:remaining]
 
@@ -350,18 +431,25 @@ def web_lookup(
 
             if total_chars_used >= total_chars:
                 print(
-                    f"[WEB] Global evidence limit reached: "
+                    "[WEB] Global evidence limit reached: "
                     f"{total_chars_used}/{total_chars} chars"
                 )
                 break
 
     except Exception as exc:
         print(
-            f"[WEB] Search failed: "
+            "[WEB] Search failed: "
             f"{type(exc).__name__}: {exc}"
         )
         return ""
 
-    return "\n\n".join(
+    combined = "\n\n".join(
         context_chunks
     )
+
+    print(
+        f"[WEB] Combined evidence: "
+        f"{len(combined)} chars"
+    )
+
+    return combined
