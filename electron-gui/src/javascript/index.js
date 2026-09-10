@@ -14,6 +14,13 @@ const attachmentTray = document.getElementById("attachment-tray");
 const toggleInput = document.querySelector(".switch input[type='checkbox']");
 const controlBtn = document.getElementById("control-btn");
 const controlImg = document.getElementById("control-img");
+const headerMenuBtn = document.getElementById("header-menu-btn");
+const headerMenu = document.getElementById("header-menu");
+const selectContainers = document.querySelectorAll(".select-container");
+const modeSelectorAssistant = document.getElementById("hm-assist-1");
+const modeSelectorCoder = document.getElementById("hm-coder-1");
+const budgetSelectorAssistant = document.getElementById("hm-assist-2");
+const budgetSelectorCoder = document.getElementById("hm-coder-2");
 
 let currentAbortController = null;
 let currentGenerationId = 0;
@@ -30,6 +37,7 @@ let saveInFlight = null;
 let isSaving = false;
 let isSearching = false;
 let pendingImages = [];
+let menuOpen = false;
 
 const isEmpty = () => outputDiv.children.length === 0;
 const API = "http://localhost:5000";
@@ -412,6 +420,8 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
         img.className = "message-image";
         img.alt = "Attached image";
         img.loading = "lazy";
+        img.style.maxWidth = "400px";
+        img.style.maxHeight = "400px";
         img.src = `${API}/image/${encodeURIComponent(imageName)}`;
         img.addEventListener("error", () => img.replaceWith(createMissingImageLabel(imageName)), { once: true });
         imageList.appendChild(img);
@@ -530,6 +540,8 @@ async function sendMessage() {
             img.className = "message-image";
             img.alt = file.name || "Attached image";
             img.src = url;
+            img.style.maxWidth = "400px";
+            img.style.maxHeight= "400px";
             img.addEventListener("load", () => revokeObjectURL(url), { once: true });
             img.addEventListener("error", () => {
                 revokeObjectURL(url);
@@ -557,8 +569,14 @@ async function sendMessage() {
 
     try {
         const form = new FormData();
+
         form.append("query", query);
         form.append("websearch", isSearching);
+        form.append("m-assist", modeSelectorAssistant.value);
+        form.append("b-assist", budgetSelectorAssistant.value)
+        form.append("m-coder",  modeSelectorCoder.value);
+        form.append("b-coder", budgetSelectorCoder.value);
+
         for (const image of generationFiles) form.append("image", image);
         if (currentChatId) form.append("chat_id", currentChatId);
 
@@ -775,3 +793,56 @@ ain.addEventListener("keydown", event => {
 });
 
 controlBtn.onclick = send;
+
+
+
+selectContainers.forEach(container => {
+    const select = container.querySelector("select");
+    if (!select) return;
+    select.addEventListener("focus", () => container.classList.add("no-after"));
+    select.addEventListener("blur",  () => container.classList.remove("no-after"));
+});
+
+
+
+
+function setMenu(open) {
+    if (menuOpen === open) return;
+    menuOpen = open;
+    headerMenu.classList.toggle("open", open);
+    headerMenuBtn.setAttribute("aria-expanded", String(open));
+}
+
+headerMenuBtn.addEventListener("click", () => setMenu(!menuOpen));
+
+/* Outside click: capture phase so it runs before chatList's stopPropagation.
+   closest("#header-menu") keeps every click INSIDE the menu (including on
+   selects) from closing it. */
+document.addEventListener("click", event => {
+    if (!menuOpen) return;
+    if (event.target.closest("#header-menu-btn") || event.target.closest("#header-menu")) return;
+    setMenu(false);
+}, true);
+
+document.addEventListener("keydown", event => {
+    if (event.key !== "Escape" || !menuOpen) return;
+    // Esc pressed to dismiss a native <select> popup shouldn't close the whole menu.
+    if (document.activeElement && document.activeElement.tagName === "SELECT") return;
+    setMenu(false);
+});
+
+/* ---- select handlers: react to change, NEVER close the menu ---- */
+const headerMenuSelectHandlers = {
+    "hm-assist-1": value => { /* TODO: assistant primary model */ },
+    "hm-assist-2": value => { /* TODO: assistant secondary option */ },
+    "hm-coder-1":  value => { /* TODO: coder model */ },
+    "hm-coder-2":  value => { /* TODO: coder option */ }
+};
+
+for (const [id, onChange] of Object.entries(headerMenuSelectHandlers)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    // Defensive: keeps future bubble-phase document handlers from hijacking select clicks.
+    el.addEventListener("click", e => e.stopPropagation());
+    el.addEventListener("change", () => onChange(el.value));
+}

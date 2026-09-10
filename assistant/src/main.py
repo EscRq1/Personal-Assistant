@@ -687,8 +687,18 @@ def stop_generation():
 # Ask
 # ================================================================
 
+
+def parse_reasoning_budget(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
 @app.route("/ask", methods=["POST"])
 def ask():
+
+    #Execution context like flags, thinking modes, etc
+    ctx = ExecutionContext()
 
     # ------------------------------------------------------------
     # 1. Normalize request input
@@ -716,11 +726,30 @@ def ask():
         chat_id = request.form.get(
             "chat_id"
         )
+        
+        ctx.assistant_thinking_mode = request.form.get(
+            "m-assist",
+            "",
+        )
+
+        ctx.assistant_thinking_budget = parse_reasoning_budget(
+            request.form.get("b-assist", "")
+        )
+
+        ctx.coder_thinking_mode = request.form.get(
+            "m-coder",
+            "",
+        )
+
+        ctx.coder_thinking_budget = parse_reasoning_budget(
+            request.form.get("b-coder", "")
+        )
 
         images = [
             img.read()
             for img in request.files.getlist("image")
         ]
+
 
     else:
 
@@ -740,8 +769,26 @@ def ask():
             "chat_id"
         )
 
-        images = None
+        ctx.assistant_thinking_mode = data.get(
+            "m-assist",
+            "",
+        )
 
+        ctx.assistant_thinking_budget = parse_reasoning_budget(
+            data.get("b-assist")
+        )
+
+        ctx.coder_thinking_mode = data.get(
+            "m-coder",
+            "",
+        )
+
+        ctx.coder_thinking_budget = parse_reasoning_budget(
+            data.get("b-coder")
+        )
+
+        images = None
+    print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
     # ------------------------------------------------------------
     # 2. Resolve chat identity
     # ------------------------------------------------------------
@@ -834,7 +881,6 @@ def ask():
         f" images={len(images) if images else 0}"
     )
 
-    ctx = ExecutionContext()
 
     # /stop cancels this exact logical request.
     with assistant.generation_lock:
