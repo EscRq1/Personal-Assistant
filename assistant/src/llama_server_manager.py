@@ -66,7 +66,7 @@ class LlamaRouterManager:
             env = os.environ.copy()
 
             # ----------------------------------------------------
-            # Flask may have CUDA_VISIBLE_DEVICES=1.
+            # FastAPI may have CUDA_VISIBLE_DEVICES=1.
             #
             # Router must see all 3 GPUs.
             # ----------------------------------------------------

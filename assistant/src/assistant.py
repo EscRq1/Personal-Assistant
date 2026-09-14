@@ -96,6 +96,7 @@ class Controller:
     # Blocking LLM / tool execution helpers
     # ============================================================
 
+    #Putting a flag into queue for asyncio event loop to constantly monitor the worker thread lifecycle
     @staticmethod
     def _queue_put(loop, queue, item):
         loop.call_soon_threadsafe(queue.put_nowait, item)
@@ -111,7 +112,8 @@ class Controller:
     ):
         """
         Run one physical llama.cpp streaming request in a worker thread.
-
+er_is_available():
+    send_request()
         requests.post() and response.iter_lines() are blocking, so neither
         is allowed to run on the asyncio event-loop thread.
         """
@@ -255,7 +257,8 @@ class Controller:
     #Handles only those threads that are not working directly with inference engine since I implemented 
     #a separate logic for llama termination
 
-    #Since CPython doesn't support proper threads termination, we should just let it run till the end and just void its result
+    #Since CPython doesn't support proper threads termination, we should just let it run till the end 
+    # in the background and just void its result
 
     @staticmethod
     def _consume_background_task(task):
@@ -307,7 +310,7 @@ class Controller:
         self,
         prompt,
         ctx,
-        target_temp=0.8,
+        target_temp=0.8,    
         system_prompt=None,
         images_b64 = None,
         web_enabled=False,
@@ -2144,6 +2147,11 @@ class ToolController:
 
 
 class ExecutionContext:
+    """
+    Special entity that lives during single turn to carry relevant to this turn execution context for backend
+    between its modules
+    
+    """
     def __init__(self):
         self.cancel_event = threading.Event()
 
