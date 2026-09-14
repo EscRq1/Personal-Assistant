@@ -5,21 +5,35 @@ import base64
 import uuid
 import threading
 import time
-from datetime import datetime
 import asyncio
-from queue import Queue
 
-from flask import Flask, request, jsonify, Response
-from flask_cors import CORS
-from flask import send_from_directory
+from datetime import datetime
+
+from fastapi import FastAPI, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import (
+    StreamingResponse,
+    JSONResponse,
+    FileResponse,
+)
+
 from colorama import Fore, init
 
 from assistant import Controller, ExecutionContext
 from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
 
 
-app = Flask(__name__)
-CORS(app)
+app = FastAPI()
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 # Initialize Colorama for terminal colors.
 init(autoreset=True)
@@ -67,11 +81,8 @@ class Main:
         max_tokens=None,
     ):
         """
-        Run one async Controller.ask() invocation from synchronous
-        Flask lifecycle code such as save/shutdown.
+        Backend-compatible endpoint for non-streaming observer calls
 
-        This creates an independent ExecutionContext because these
-        calls are separate from the user's active generation request.
         """
 
         ctx = ExecutionContext()
@@ -117,7 +128,7 @@ class Main:
             "- Avoid names, private/sensitive info, and long numbers unless essential.\n"
             "- No emojis, no quotes, no markdown, no prefixes like “Title:” or “Snippet:”.\n"
             "- Use the same language as the user’s last message.\n"
-            "- Keep it generic: mention the type of request (e.g., “debugging”, “planning”, “comparison”) not every detail.\n"
+            "- Keep it generic: mention the type of Request (e.g., “debugging”, “planning”, “comparison”) not every detail.\n"
             "Example Output:\n"
             '{"title": "Weather Inquiry", "snippet": "User asked about current weather in Tashkent."}\n'
             "STRICT: ONLY OUTPUT JSON."
@@ -470,7 +481,7 @@ class Main:
 
         system_prompt = (
             "You are a Personal Assistant.\n"
-            "Answer in the SAME language as the user's request.\n"
+            "Answer in the SAME language as the user's Request.\n"
             "Use $ signs with latex only; otherwise write the word dollar instead of $.\n"
             f"Current Time: {tashkent_now} "
             "(Tashkent, Uzbekistan).\n\n"
@@ -613,75 +624,31 @@ def normalize_pin_value(value) -> int:
 
 
 # ================================================================
-# Async-generator -> Flask WSGI bridge
-# ================================================================
-
-import asyncio
-import threading
-from queue import Queue
-
-
-def stream_async_generator(async_generator):
-
-    output_queue = Queue()
-    finished = object()
-
-    async def consume():
-
-        try:
-            async for item in async_generator:
-                output_queue.put(item)
-
-        except Exception as exc:
-            output_queue.put(exc)
-
-        finally:
-            output_queue.put(finished)
-
-    def runner():
-        asyncio.run(consume())
-
-    thread = threading.Thread(
-        target=runner,
-        daemon=True,
-    )
-
-    thread.start()
-
-    while True:
-
-        item = output_queue.get()
-
-        if item is finished:
-            break
-
-        if isinstance(item, Exception):
-            raise item
-
-        yield item
-
-
-# ================================================================
 # Generation stop endpoint
 # ================================================================
 
-@app.route("/stop", methods=["POST"])
+@app.post("/stop")
 def stop_generation():
 
     with assistant.generation_lock:
         ctx = assistant.generation_context
 
     if ctx is None:
-        return jsonify({
-            "status": "no_active_generation",
-        }), 200
+        return JSONResponse(
+            content={
+                "status": "no_active_generation",
+            },
+            status_code=200,
+        )
 
     ctx.cancel_event.set()
 
-    return jsonify({
-        "status": "stopping",
-    }), 200
-
+    return JSONResponse(
+        content={
+            "status": "stopping",
+        },
+        status_code=200,
+    )
 
 # ================================================================
 # Ask
@@ -694,66 +661,65 @@ def parse_reasoning_budget(value):
     except (TypeError, ValueError):
         return -1
 
-@app.route("/ask", methods=["POST"])
-def ask():
+@app.post("/ask")
+async def ask(request: Request):
 
     #Execution context like flags, thinking modes, etc
     ctx = ExecutionContext()
 
     # ------------------------------------------------------------
-    # 1. Normalize request input
+    # 1. Normalize Request input
     # ------------------------------------------------------------
+    content_type = request.headers.get("content-type", "")
 
-    is_multipart = (
-        request.content_type
-        and request.content_type.startswith(
-            "multipart/form-data"
-        )
-    )
-
+    is_multipart = content_type.startswith("multipart/form-data")
+    
     if is_multipart:
+        form = await request.form()
 
-        query = request.form.get(
+        query = form.get(
             "query",
             "",
         )
 
-        raw_search = request.form.get(
+        raw_search = form.get(
             "websearch",
             "false",
         )
 
-        chat_id = request.form.get(
+        chat_id = form.get(
             "chat_id"
         )
         
-        ctx.assistant_thinking_mode = request.form.get(
+        ctx.assistant_thinking_mode = form.get(
             "m-assist",
             "",
         )
 
         ctx.assistant_thinking_budget = parse_reasoning_budget(
-            request.form.get("b-assist", "")
+            form.get("b-assist", "")
         )
 
-        ctx.coder_thinking_mode = request.form.get(
+        ctx.coder_thinking_mode = form.get(
             "m-coder",
             "",
         )
 
         ctx.coder_thinking_budget = parse_reasoning_budget(
-            request.form.get("b-coder", "")
+            form.get("b-coder", "")
         )
 
+        files = form.getlist("image")
         images = [
-            img.read()
-            for img in request.files.getlist("image")
+            await img.read()
+            for img in files
+            if isinstance(img, UploadFile)
         ]
 
 
     else:
 
-        data = request.json or {}
+        data = await request.json()
 
         query = data.get(
             "query",
@@ -813,7 +779,8 @@ def ask():
 
         try:
 
-            legacy = assistant.memory.history.get(
+            legacy = await asyncio.to_thread(
+                assistant.memory.history.get,
                 ids=[chat_id],
                 include=[
                     "documents",
@@ -882,27 +849,24 @@ def ask():
     )
 
 
-    # /stop cancels this exact logical request.
+    # /stop cancels this exact logical Request.
     with assistant.generation_lock:
         assistant.generation_context = ctx
 
-    async_generator = assistant.process_query(
-        query,
-        search,
-        images=images,
-        ctx=ctx,
-    )
 
     # ------------------------------------------------------------
     # 4. Convert async generator to a Flask-compatible generator
     # ------------------------------------------------------------
 
-    def generate():
+    async def generate():
 
         try:
 
-            for token in stream_async_generator(
-                async_generator
+            async for token in assistant.process_query(
+                query,
+                search,
+                images=images,
+                ctx=ctx,
             ):
 
                 if ctx.cancel_event.is_set():
@@ -931,9 +895,9 @@ def ask():
                 if assistant.generation_context is ctx:
                     assistant.generation_context = None
 
-    return Response(
+    return StreamingResponse(
         generate(),
-        mimetype="text/event-stream",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
@@ -946,17 +910,21 @@ def ask():
 # Summary
 # ================================================================
 
-@app.route("/sum", methods=["POST"])
+@app.post("/sum")
 def summary():
 
     if not assistant.summary:
-        return jsonify({
-            "title": "New chat",
-            "snippet": "",
-        })
+        return JSONResponse(
+            content={
+                "title": "New chat",
+                "snippet": "",
+            },
+            status_code=200,
+        )
 
-    return jsonify(
-        assistant.summary
+    return JSONResponse(
+        content=assistant.summary,
+        status_code=200,
     )
 
 
@@ -1194,36 +1162,42 @@ def finalize_session(chat_id=None):
 # Save
 # ================================================================
 
-@app.route("/save", methods=["POST"])
-def save_session_to_long_term():
+@app.post("/save")
+async def save_session_to_long_term(
+    request: Request,
+):
 
-    # Kept for compatibility.
-    # Electron quit flow should use /shutdown.
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
 
     chat_id = (
-        request.form.get("chat_id")
+        form.get("chat_id")
         or data.get("chat_id")
         or None
     )
 
-    payload, status_code = finalize_session(
-        chat_id
+    payload, status_code = await asyncio.to_thread(
+        finalize_session,
+        chat_id,
     )
 
-    return jsonify(
-        payload
-    ), status_code
-
+    return JSONResponse(
+        content=payload,
+        status_code=status_code,
+    )
 
 # ================================================================
 # History
 # ================================================================
 
-@app.route("/history", methods=["GET"])
+@app.get("/history")
 def get_history():
 
     try:
@@ -1292,27 +1266,30 @@ def get_history():
             reverse=True,
         )
 
-        return jsonify(
-            history_list
-        ), 200
+        return JSONResponse(
+            content=history_list,
+            status_code=200,
+        )
 
     except Exception:
-
         import traceback
         traceback.print_exc()
 
-        return jsonify({
-            "status": "error",
-            "history": [],
-        }), 500
+        return JSONResponse(
+            content={
+                "status": "error",
+                "history": [],
+            },
+            status_code=500,
+        )
 
 
 # ================================================================
 # Chat content
 # ================================================================
 
-@app.route("/chat/<chat_id>", methods=["GET"])
-def get_chat_content(chat_id):
+@app.get("/chat/{chat_id}")
+def get_chat_content(chat_id: str):
 
     try:
 
@@ -1325,53 +1302,59 @@ def get_chat_content(chat_id):
             document = result["documents"][0]
 
             try:
-
-                messages = json.loads(
-                    document
-                )
+                messages = json.loads(document)
 
             except json.JSONDecodeError:
 
-                return jsonify({
-                    "error": (
-                        "Stored chat is not valid JSON"
-                    ),
-                }), 500
+                return JSONResponse(
+                    content={
+                        "error": (
+                            "Stored chat is not valid JSON"
+                        ),
+                    },
+                    status_code=500,
+                )
 
-            if not isinstance(
-                messages,
-                list,
-            ):
+            if not isinstance(messages, list):
 
-                return jsonify({
-                    "error": (
-                        "Stored chat has invalid format"
-                    ),
-                }), 500
+                return JSONResponse(
+                    content={
+                        "error": (
+                            "Stored chat has invalid format"
+                        ),
+                    },
+                    status_code=500,
+                )
 
-            return jsonify({
-                "messages": messages,
-            })
+            return JSONResponse(
+                content={
+                    "messages": messages,
+                },
+                status_code=200,
+            )
 
-        return jsonify({
-            "error": "Chat not found",
-        }), 404
+        return JSONResponse(
+            content={
+                "error": "Chat not found",
+            },
+            status_code=404,
+        )
 
-    except Exception as e:
+    except Exception as exc:
 
-        return jsonify({
-            "error": str(e),
-        }), 500
-
+        return JSONResponse(
+            content={
+                "error": str(exc),
+            },
+            status_code=500,
+        )
 
 # ================================================================
 # Prune
 # ================================================================
 
-@app.route("/prune", methods=["POST"])
+@app.post("/prune")
 def clear():
-
-    """Compatibility endpoint for manual pruning."""
 
     print(
         f"{Fore.CYAN}"
@@ -1380,18 +1363,21 @@ def clear():
 
     assistant.memory.prune_memories()
 
-    return jsonify({
-        "status": "success",
-    }), 200
-
+    return JSONResponse(
+        content={
+            "status": "success",
+        },
+        status_code=200,
+    )
 
 # ================================================================
 # Shutdown
 # ================================================================
 
-@app.route("/shutdown", methods=["POST"])
-def shutdown_session():
-
+@app.post("/shutdown")
+async def shutdown_session(
+    request: Request,
+):
     """
     Single endpoint used by Electron when the application is quitting.
 
@@ -1405,79 +1391,95 @@ def shutdown_session():
       6) terminate llama-router
     """
 
-    # ------------------------------------------------------------
-    # Stop active generation before finalization.
-    # ------------------------------------------------------------
-
     with assistant.generation_lock:
         active_ctx = assistant.generation_context
 
     if active_ctx is not None:
         active_ctx.cancel_event.set()
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
 
     chat_id = (
-        request.form.get("chat_id")
+        form.get("chat_id")
         or data.get("chat_id")
         or None
     )
 
-    payload, status_code = finalize_session(
-        chat_id
+    payload, status_code = await asyncio.to_thread(
+        finalize_session,
+        chat_id,
     )
 
-    # ------------------------------------------------------------
-    # Prune memory
-    # ------------------------------------------------------------
-
     try:
+        await asyncio.to_thread(
+            assistant.memory.prune_memories
+        )
 
-        assistant.memory.prune_memories()
-
-    except Exception as e:
+    except Exception as exc:
 
         print(
             f"[Shutdown]: "
-            f"Memory pruning failed: {e}"
+            f"Memory pruning failed: {exc}"
         )
 
-        # Chat may already be safely saved.
-        return jsonify({
-            "status": "partial",
-            "save": payload,
-            "prune_error": str(e),
-        }), 500
-
-    # ------------------------------------------------------------
-    # Stop llama-router
-    # ------------------------------------------------------------
+        return JSONResponse(
+            content={
+                "status": "partial",
+                "save": payload,
+                "prune_error": str(exc),
+            },
+            status_code=500,
+        )
 
     print(
         f"{Fore.CYAN}"
         "[Saving memories and shutting down. Goodbye!]"
     )
 
-    assistant.llm.router.terminate()
+    await asyncio.to_thread(
+        assistant.llm.router.terminate
+    )
 
-    return jsonify({
-        "status": "success",
-        "save": payload,
-    }), status_code
+    return JSONResponse(
+        content={
+            "status": "success",
+            "save": payload,
+        },
+        status_code=status_code,
+    )
 
 
 # ================================================================
 # Images
 # ================================================================
 
-@app.route("/image/<name>")
-def get_image(name):
+@app.get("/image/{name}")
+def get_image(name: str):
 
-    return send_from_directory(
+    safe_name = os.path.basename(name)
+    file_path = os.path.join(
         MEMORY_IMAGES_DIR,
-        name,
+        safe_name,
+    )
+
+    if not os.path.isfile(file_path):
+        return JSONResponse(
+            content={
+                "error": "Image not found",
+            },
+            status_code=404,
+        )
+
+    return FileResponse(
+        file_path
     )
 
 
@@ -1485,72 +1487,94 @@ def get_image(name):
 # Delete
 # ================================================================
 
-@app.route("/delete", methods=["POST"])
-def delete():
+@app.post("/delete")
+async def delete(request: Request):
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
 
     chat_id = (
-        request.form.get("id")
+        form.get("id")
         or data.get("id")
         or ""
     ).strip()
 
-    ok = assistant.memory.delete_history(
-        chat_id
+    ok = await asyncio.to_thread(
+        assistant.memory.delete_history,
+        chat_id,
     )
 
     if not ok:
-
-        return jsonify({
-            "status": "error",
-            "message": "Delete failed",
-        }), 400
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Delete failed",
+            },
+            status_code=400,
+        )
 
     if assistant.current_chat_id == chat_id:
-
         assistant.current_chat_id = None
         assistant.short_term_memory = []
         assistant.pending_profile_inputs = []
         assistant.summary = ""
 
-    return jsonify({
-        "status": "success",
-    }), 200
-
+    return JSONResponse(
+        content={
+            "status": "success",
+        },
+        status_code=200,
+    )
 
 # ================================================================
 # Rename
 # ================================================================
 
-@app.route("/rename", methods=["POST"])
-def rename_chat():
+@app.post("/rename")
+async def rename_chat(request: Request):
 
-    chat_id = request.form.get(
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+
+    chat_id = form.get(
         "id",
-        ""
+        "",
     )
 
-    title = request.form.get(
+    title = form.get(
         "title",
-        ""
+        "",
     )
 
-    ok = assistant.memory.rename_history(
+    ok = await asyncio.to_thread(
+        assistant.memory.rename_history,
         chat_id,
         title,
     )
 
     if not ok:
-        return jsonify({
-            "status": "error",
-        }), 400
+        return JSONResponse(
+            content={
+                "status": "error",
+            },
+            status_code=400,
+        )
 
-    return jsonify({
-        "status": "success",
-    }), 200
+    return JSONResponse(
+        content={
+            "status": "success",
+        },
+        status_code=200,
+    )
 
 
 # ================================================================
@@ -1559,72 +1583,86 @@ def rename_chat():
 
 
 
-@app.route("/pin", methods=["POST"])
-def pin_chat():
+@app.post("/pin")
+async def pin_chat(request: Request):
 
-    data = request.get_json(
-        silent=True
-    ) or {}
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
 
     chat_id = (
-        request.form.get("id")
+        form.get("id")
         or data.get("id")
         or ""
     ).strip()
 
     if not chat_id:
-
-        return jsonify({
-            "status": "error",
-            "message": "Missing chat id",
-        }), 400
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Missing chat id",
+            },
+            status_code=400,
+        )
 
     try:
 
-        # Serialize pin changes with save/shutdown so
-        # metadata cannot be lost in a read-modify-write race.
-        with assistant.finalize_lock:
+        def toggle_pin():
+            with assistant.finalize_lock:
+                return assistant.memory.toggle_pin_history(
+                    chat_id
+                )
 
-            pinned = assistant.memory.toggle_pin_history(
-                chat_id
-            )
+        pinned = await asyncio.to_thread(
+            toggle_pin
+        )
 
-    except Exception as e:
+    except Exception as exc:
 
-        app.logger.exception(
+        import logging
+        logging.exception(
             "Pin toggle failed"
         )
 
-        return jsonify({
-            "status": "error",
-            "message": str(e),
-        }), 500
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": str(exc),
+            },
+            status_code=500,
+        )
 
     if pinned is None:
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Chat not found",
+            },
+            status_code=404,
+        )
 
-        return jsonify({
-            "status": "error",
-            "message": "Chat not found",
-        }), 404
-
-    return jsonify({
-        "status": "success",
-        "id": chat_id,
-        "pinned": normalize_pin_value(
-            pinned
-        ),
-    }), 200
-
-
-# ================================================================
-# Entrypoint
-# ================================================================
+    return JSONResponse(
+        content={
+            "status": "success",
+            "id": chat_id,
+            "pinned": normalize_pin_value(
+                pinned
+            ),
+        },
+        status_code=200,
+    )
 
 if __name__ == "__main__":
+    import uvicorn
 
-    # Explicitly bind to localhost on port 5000.
-    app.run(
+    uvicorn.run(
+        app,
         host="127.0.0.1",
         port=5000,
-        debug=False,
     )
