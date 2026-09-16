@@ -657,7 +657,7 @@ class Main:
         # --------------------------------------------------------
         # 4. Actual Assistant generation
         # --------------------------------------------------------
-        async for token in self.llm.ask(
+        llm_stream = self.llm.ask(
             user_input,
             model="Assistant",
             system_prompt=system_prompt,
@@ -665,12 +665,17 @@ class Main:
             purpose="prompt",
             web_enabled=is_forced_search,
             ctx=ctx,
-        ):
-            if ctx.cancel_event.is_set():
-                return
-            full_response += token
-            # Stream token to Electron through the FastAPI SSE response.
-            yield token
+        )
+
+        try:
+            async for token in llm_stream:
+                if ctx.cancel_event.is_set():
+                    break
+
+                full_response += token
+                yield token
+        finally:
+            await llm_stream.aclose()
 
         t4 = time.perf_counter()
 

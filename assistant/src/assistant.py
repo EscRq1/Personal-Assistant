@@ -109,8 +109,7 @@ class Controller:
     ):
         """
         Run one physical llama.cpp streaming request in a worker thread.
-er_is_available():
-    send_request()
+        
         requests.post() and response.iter_lines() are blocking, so neither
         is allowed to run on the asyncio event-loop thread.
         """
