@@ -89,6 +89,9 @@ class Main:
         self.generation_context = None
 
         self.notebook = memory_manager.assistant_notebook
+        
+
+        self.api_loop = None
     # ============================================================
     # Synchronous helper for lifecycle Observer calls
     # ============================================================
@@ -142,9 +145,8 @@ class Main:
         self.short_term_generation += 1
         return rolled_over
     
-    async def compact_short_term_memory(self, chat_state_generation: int):
+    async def compact_short_term_memory(self, ctx, chat_state_generation):
         """Background Observer worker. Pending raw blocks are processed in order."""
-        ctx = self.compaction_context or ExecutionContext()
         while self.pending_compaction_blocks:
             if chat_state_generation != self.chat_state_generation or ctx.cancel_event.is_set():
                 return
@@ -223,14 +225,24 @@ class Main:
             )
             return
         generation = self.chat_state_generation
-        self.compaction_task = asyncio.create_task(
-            self.compact_short_term_memory(
-                chat_state_generation=generation,
+        def create_task():
+            ctx = ExecutionContext()
+            self.compaction_context = ctx
+
+            self.compaction_task = asyncio.create_task(
+                self.compact_short_term_memory(
+                    chat_state_generation=generation,
+                    ctx = ctx,
+                )
             )
-        )
-        self.compaction_task.add_done_callback(
-            self._memory_compaction_done
-        )
+            self.compaction_task.add_done_callback(
+                self._memory_compaction_done
+            )
+
+        #schedule this task to the fastapi's event loop in another thread,
+        #so it won't be cancelled alongside the generation thread        
+        self.api_loop.call_soon_threadsafe(create_task)
+
         print(
             "[MEMORY] Background compaction scheduled "
             f"(chat_generation={generation})"
@@ -894,6 +906,7 @@ async def ask(request: Request):
 
     ctx = ExecutionContext()
 
+    assistant.api_loop = asyncio.get_running_loop()
     # ------------------------------------------------------------
 
     # 1. Normalize Request input
@@ -1183,6 +1196,18 @@ def finalize_session(chat_id=None):
         if not isinstance(generated, dict):
             generated = {}
         now = datetime.now().isoformat(timespec="microseconds")
+
+        compacted_data = assistant.compacted_short_term_memory
+
+        if not compacted_data:
+            compacted_data = existing_meta.get("compacted_data", "")
+
+        if isinstance(compacted_data, list):
+            compacted_data = "".join(compacted_data)
+
+        if not isinstance(compacted_data, str):
+            compacted_data = str(compacted_data)
+
         metadata = {
             "title": str(
                 generated.get("title")
@@ -1204,7 +1229,9 @@ def finalize_session(chat_id=None):
             ),
             "updated_at": now,
             "timestamp": now,
+            "compacted_data": compacted_data,
         }
+        
         assistant.summary = {
             "title": metadata["title"],
             "snippet": metadata["snippet"],
@@ -1639,6 +1666,28 @@ async def pin_chat(request: Request):
         },
         status_code=200,
     )
+
+
+
+
+@app.post("/sum")
+def summary():
+
+    if not assistant.summary:
+        return JSONResponse(
+            content={
+                "title": "New chat",
+                "snippet": "",
+            },
+            status_code=200,
+        )
+    
+    return JSONResponse(
+        content=assistant.summary,
+        status_code=200,
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
