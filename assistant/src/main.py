@@ -6,6 +6,7 @@ import uuid
 import threading
 import time
 import asyncio
+from queue import Queue
 
 from datetime import datetime
 
@@ -743,12 +744,94 @@ def normalize_pin_value(value) -> int:
         in {"1", "true", "yes", "on"}
         else 0
     )
+# ================================================================
+# Async generation -> synchronous FastAPI streaming bridge
+# ================================================================
+#
+# This deliberately mirrors the known-good Flask architecture:
+# the LLM coroutine gets its own asyncio event loop in a dedicated
+# worker thread, while the HTTP/SSE side only consumes a thread-safe
+# queue. This keeps the generation lifecycle independent from the
+# ASGI request task.
+
+_GENERATION_FINISHED = object()
+
+
+def _run_async_generation(async_generator, output_queue):
+    """Consume one async generation stream in a dedicated event loop."""
+
+    async def consume():
+        try:
+            async for item in async_generator:
+                output_queue.put(("token", item))
+        except asyncio.CancelledError:
+            output_queue.put(("cancelled", None))
+        except Exception as exc:
+            output_queue.put(("error", exc))
+        finally:
+            output_queue.put(("done", _GENERATION_FINISHED))
+
+    asyncio.run(consume())
+
+
+def stream_async_generator(async_generator, ctx):
+    """
+    Bridge an async generation stream into a synchronous iterator.
+
+    FastAPI/Starlette can consume a normal synchronous iterable for
+    StreamingResponse in its worker pool. The actual generation runs in
+    a separate thread/event loop, matching the architecture of the
+    known-good Flask implementation.
+    """
+
+    output_queue = Queue()
+
+    worker = threading.Thread(
+        target=_run_async_generation,
+        args=(async_generator, output_queue),
+        daemon=True,
+    )
+    worker.start()
+
+    try:
+        while True:
+            kind, value = output_queue.get()
+
+            if kind == "token":
+                if ctx.cancel_event.is_set():
+                    return
+                yield value
+                continue
+
+            if kind == "error":
+                raise value
+
+            if kind in {"cancelled", "done"}:
+                return
+
+    except GeneratorExit:
+        print("[Server] Client disconnected")
+        ctx.cancel_event.set()
+        raise
+    finally:
+        ctx.cancel_event.set()
+
+
+def sse_token(token):
+    """Serialize one generated token as an SSE data frame."""
+    return (
+        f"data: {json.dumps({'token': token})}"
+        f"\n\n"
+    )
+
 
 
 @app.post("/stop")
 def stop_generation():
+
     with assistant.generation_lock:
         ctx = assistant.generation_context
+
     if ctx is None:
         return JSONResponse(
             content={
@@ -756,7 +839,9 @@ def stop_generation():
             },
             status_code=200,
         )
+
     ctx.cancel_event.set()
+
     return JSONResponse(
         content={
             "status": "stopping",
@@ -764,6 +849,24 @@ def stop_generation():
         status_code=200,
     )
 
+async def stop_active_generation(timeout=5.0):
+
+    with assistant.generation_lock:
+        ctx = assistant.generation_context
+
+    if ctx is None:
+        return True
+
+    ctx.cancel_event.set()
+    try:
+        await asyncio.wait_for(asyncio.to_thread(ctx.llm_done.wait), timeout=timeout)
+        return True
+
+    except asyncio.TimeoutError:
+        print("[Server] Active generation did not stop within timeout.")
+
+        return False
+    
 async def stop_active_generation(timeout=5.0):
     with assistant.generation_lock:
         ctx = assistant.generation_context
@@ -786,63 +889,85 @@ def parse_reasoning_budget(value):
 
 @app.post("/ask")
 async def ask(request: Request):
+
     #Execution context like flags, thinking modes, etc
+
     ctx = ExecutionContext()
+
     # ------------------------------------------------------------
+
     # 1. Normalize Request input
+
     # ------------------------------------------------------------
+
     content_type = request.headers.get("content-type", "")
     is_multipart = content_type.startswith("multipart/form-data")
+
     if is_multipart:
         form = await request.form()
+
         query = form.get(
             "query",
             "",
         )
+
         raw_search = form.get(
             "websearch",
             "false",
         )
+
         chat_id = form.get(
             "chat_id"
         )
+
         ctx.assistant_thinking_mode = form.get(
             "m-assist",
             "",
         )
+
         ctx.assistant_thinking_budget = parse_reasoning_budget(
             form.get("b-assist", "")
         )
+
         ctx.coder_thinking_mode = form.get(
             "m-coder",
             "",
         )
+
         ctx.coder_thinking_budget = parse_reasoning_budget(
             form.get("b-coder", "")
         )
+
         files = form.getlist("image")
+
         images = [
             await img.read()
             for img in files
             if isinstance(img, UploadFile)
         ]
+
     else:
         data = await request.json()
+
         query = data.get(
             "query",
             "",
         )
+
         raw_search = data.get(
             "websearch",
             False,
         )
+
         chat_id = data.get(
             "chat_id"
         )
+
         ctx.assistant_thinking_mode = data.get(
             "m-assist",
             "",
         )
+
         ctx.assistant_thinking_budget = parse_reasoning_budget(
             data.get("b-assist")
         )
@@ -855,10 +980,13 @@ async def ask(request: Request):
         )
         images = None
     print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
+
     # ------------------------------------------------------------
+
     # 2. Resolve chat identity
     # Never use short_term_memory emptiness to decide whether the chat is
     # loaded: background compaction intentionally clears that list.
+
     if chat_id:
         if (
             chat_id != assistant.current_chat_id
@@ -875,13 +1003,16 @@ async def ask(request: Request):
                         "metadatas",
                     ],
                 )
+
                 if (
                     legacy
                     and legacy.get("documents")
                     and legacy["documents"][0]
                 ):
+
                     document = legacy["documents"][0]
                     restored = assistant.seed_from_chat_document(document)
+
                     if not restored:
                         return JSONResponse(
                             content={
@@ -889,21 +1020,27 @@ async def ask(request: Request):
                             },
                             status_code=500,
                         )
+
                     assistant.pending_profile_inputs = []
+
                     assistant.current_chat_id = chat_id
+
                     raw_metadata = (
                         legacy.get("metadatas", [{}])[0]
                         if legacy.get("metadatas")
                         else {}
                     ) or {}
+
                     assistant.summary = {
                         "title": raw_metadata.get("title", "Chat"),
                         "snippet": raw_metadata.get("snippet", ""),
                     }
+
                     print(
                         f"{Fore.CYAN}"
                         f"[Legacy seeded: {chat_id}]"
                     )
+
                 else:
                     return JSONResponse(
                         content={
@@ -911,59 +1048,70 @@ async def ask(request: Request):
                         },
                         status_code=404,
                     )
+
             except Exception as e:
                 print(f"[Legacy seed error]: {e}")
+                
                 return JSONResponse(
                     content={
                         "error": str(e),
                     },
                     status_code=500,
                 )
+
     elif not assistant.chat_initialized:
+
         # No chat_id means a fresh unsaved conversation. This does not happen
         # merely because compaction cleared the live raw buffer.
         assistant.reset_chat_state()
         assistant.chat_initialized = True
     # 3. Create generation context
-    # ------------------------------------------------------------
+
+
     search = parse_bool(raw_search)
+
     print(
+
         f"{Fore.YELLOW}"
         f"[Server]: Received query: "
         f"{query[:60]}..."
         f" images={len(images) if images else 0}"
+
     )
+
     # /stop cancels this exact logical Request.
+
     with assistant.generation_lock:
         assistant.generation_context = ctx
+
     # ------------------------------------------------------------
-    # 4. Native async SSE generator
+    # 4. Flask-compatible detached generation bridge
     # ------------------------------------------------------------
-    async def generate():
+    async_generator = assistant.process_query(
+        query,
+        search,
+        images=images,
+        ctx=ctx,
+    )
+
+    def generate():
         try:
-            async for token in assistant.process_query(
-                query,
-                search,
-                images=images,
-                ctx=ctx,
+            for token in stream_async_generator(
+                async_generator,
+                ctx,
             ):
                 if ctx.cancel_event.is_set():
                     return
-                yield (
-                    f"data: "
-                    f"{json.dumps({'token': token})}"
-                    f"\n\n"
-                )
+                yield sse_token(token)
         except GeneratorExit:
-            print(
-                "[Server] Client disconnected"
-            )
+            print("[Server] Client disconnected")
             ctx.cancel_event.set()
             raise
         finally:
             with assistant.generation_lock:
                 if assistant.generation_context is ctx:
                     assistant.generation_context = None
+
     return StreamingResponse(
         generate(),
         media_type="text/event-stream",
@@ -972,22 +1120,6 @@ async def ask(request: Request):
             "X-Accel-Buffering": "no",
             "Connection": "keep-alive",
         },
-    )
-
-
-@app.post("/sum")
-def summary():
-    if not assistant.summary:
-        return JSONResponse(
-            content={
-                "title": "New chat",
-                "snippet": "",
-            },
-            status_code=200,
-        )
-    return JSONResponse(
-        content=assistant.summary,
-        status_code=200,
     )
 
 
