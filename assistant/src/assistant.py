@@ -6,10 +6,7 @@ from contextvars import ContextVar
 import socket
 
 
-from tools.web_search import (
-    web_lookup,
-    is_online,
-)
+from tools.web_search import web_lookup
 
 from tools.tool_registry import (
     get_registered_tools,
@@ -289,17 +286,24 @@ er_is_available():
             asyncio.to_thread(function, *args, **kwargs)
         )
 
-        while not task.done():
-            if ctx.cancel_event.is_set():
-                # The Python worker is allowed to finish naturally. Consume
-                # any eventual exception so it cannot become an unhandled-task
-                # warning after the logical request has already stopped.
-                task.add_done_callback(self._consume_background_task)
-                return None
+        try:
+            while not task.done():
+                if ctx.cancel_event.is_set():
+                    # The Python worker cannot be force-killed safely. Stop
+                    # waiting for it and consume its eventual result.
+                    task.add_done_callback(self._consume_background_task)
+                    return None
 
-            await asyncio.sleep(0.02)
+                await asyncio.sleep(0.02)
 
-        return await task
+            return await task
+        except asyncio.CancelledError:
+            # Important for background Observer work: cancelling the asyncio
+            # task must propagate into ExecutionContext so the existing
+            # cancellation watchdog can terminate an active LLM request.
+            ctx.cancel_event.set()
+            task.add_done_callback(self._consume_background_task)
+            raise
 
     # ============================================================
     # Assistant streaming
@@ -1329,12 +1333,6 @@ er_is_available():
                 "error": "Empty web request."
             })
 
-        if not is_online():
-            return json.dumps({
-                "error": "Internet connection unavailable."
-            })
-
-
         print(
             f"{Fore.CYAN}"
             f"[WEB] generated query: {request}"
@@ -2319,4 +2317,3 @@ class ExecutionContext:
 
         controller.router.kill()
         self.router_restart_required.set()
-
