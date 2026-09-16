@@ -1,6 +1,7 @@
 import gc
 import threading
 import time
+import torch
 from enum import Enum
 
 import requests
@@ -252,34 +253,27 @@ class ResourceManager:
 
         return self._jina
 
-    def _release_jina(self) -> None:
+    def _release_jina(self):
         if self._jina is None:
             return
 
-        print(
-            f"{Fore.YELLOW}"
-            "[RESOURCE MANAGER] releasing Jina..."
-        )
+        print("[RESOURCE MANAGER] Releasing Jina reranker...")
 
         try:
-            # Drop the reference first.
+            self._jina.release()
+        finally:
             self._jina = None
-
-            # Ask Python/PyTorch to release objects and cached CUDA
-            # allocations. This is intentionally defensive.
             gc.collect()
 
-            try:
-                import torch
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    torch.cuda.ipc_collect()
-            except ImportError:
-                pass
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
 
-        finally:
-            # Give CUDA a brief moment to finish teardown.
             time.sleep(0.5)
+
+        print("[RESOURCE MANAGER] Jina released")
+
 
         print(
             f"{Fore.GREEN}"

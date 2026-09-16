@@ -60,3 +60,13 @@ class JinaReranker:
         )
 
         return results
+    def release(self):
+        if self.model is not None:
+            self.model.to("cpu")
+            del self.model
+            self.model = None
+
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
