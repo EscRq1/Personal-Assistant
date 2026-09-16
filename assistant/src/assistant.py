@@ -1760,18 +1760,31 @@ class ToolController:
     # ========================================================
     # BUILD ASSISTANT TOOL-CALL MESSAGE
     # ========================================================
-    def estimate_tokens(self, text: str) -> int:
+    def estimate_tokens(self, text) -> int:
         """
         Rough token estimate for budgeting only.
 
         This is intentionally conservative enough for preventing
         context explosions. It is not used for model billing.
         """
+        if text is None:
+            return 0
+
+        if not isinstance(text, str):
+            try:
+                text = json.dumps(
+                    text,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            except (TypeError, ValueError):
+                text = str(text)
+
         if not text:
             return 0
 
         return max(1, len(text) // 4)
-
+    
     def compress_web_batch(
         self,
         results: list[dict],
