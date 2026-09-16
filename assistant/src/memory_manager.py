@@ -73,10 +73,12 @@ class MemoryManager:
             name="memory_turns"
         )
 
+
         self.fts_path = os.path.join(
             self.persist_directory,
             "memory_turns_fts.sqlite3",
         )
+
         self._init_fts()
 
         self.profile_col = self.client.get_or_create_collection(
@@ -90,6 +92,7 @@ class MemoryManager:
         self.assistant_notebook = self.client.get_or_create_collection(
             name="assistant_notebook"
         )
+        
 
         self.profile_cache = self._load_profile()
         self.last_profile_update_ts = 0
@@ -748,13 +751,15 @@ class MemoryManager:
     # History
     # ============================================================
 
-    def add_history(self, text: str, summary: dict):
+    def add_history(self, text: str, summary: dict, compacted_memory: str = None):
         doc_id = str(uuid.uuid4())
 
         metadata = dict(summary or {})
         metadata["pinned"] = self.normalize_pin_value(
             metadata.get("pinned", 0)
         )
+        if compacted_memory is not None:
+            metadata["compacted_data"] = compacted_memory
 
         self.history.add(
             documents=[text],
@@ -769,6 +774,50 @@ class MemoryManager:
         )
 
         return doc_id
+
+    def update_history(
+        self,
+        chat_id: str,
+        text: str,
+        metadata: dict | None = None,
+    ) -> bool:
+        """Update one canonical chat and rebuild its retrieval index."""
+        chat_id = str(chat_id or "").strip()
+        if not chat_id or not isinstance(text, str):
+            return False
+
+        try:
+            existing = self.history.get(
+                ids=[chat_id],
+                include=["metadatas"],
+            )
+            if not existing.get("ids"):
+                return False
+
+            metadata = dict(metadata or {})
+            metadata["pinned"] = self.normalize_pin_value(
+                metadata.get("pinned", 0)
+            )
+
+            self.history.update(
+                ids=[chat_id],
+                documents=[text],
+                metadatas=[metadata],
+            )
+
+            self.sync_turn_index(
+                chat_id=chat_id,
+                document=text,
+                metadata=metadata,
+            )
+            return True
+
+        except Exception as exc:
+            print(
+                f"{Fore.RED}"
+                f"[Update History Error]: {exc}"
+            )
+            return False
 
     def get_history_metadata(
         self,
@@ -905,7 +954,7 @@ class MemoryManager:
         return new_value
 
     def prune_memories(self):
-        """Delete very short junk history items."""
+        """Delete very short junk history items and their search indexes."""
         existing = self.history.get(
             include=["documents"]
         )
@@ -933,17 +982,22 @@ class MemoryManager:
                     chat_id
                 )
 
-        if ids_to_delete:
-            self.history.delete(
-                ids=ids_to_delete
-            )
+        if not ids_to_delete:
+            return
 
-            print(
-                f"{Fore.RED}"
-                f"Cleaned "
-                f"{len(ids_to_delete)} "
-                f"junk history items."
-            )
+        self.history.delete(
+            ids=ids_to_delete
+        )
+
+        for chat_id in ids_to_delete:
+            self._delete_turn_index_for_chat(chat_id)
+
+        print(
+            f"{Fore.RED}"
+            f"Cleaned "
+            f"{len(ids_to_delete)} "
+            f"junk history items."
+        )
 
     # ============================================================
     # Profile merge
@@ -1398,6 +1452,8 @@ class MemoryManager:
                 f"{type(exc).__name__}: {exc}"
             )
             return []
+
+    
 
 
 memory_manager = MemoryManager()
