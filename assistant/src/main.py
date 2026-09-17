@@ -594,30 +594,40 @@ class Main:
         )
         if ctx.cancel_event.is_set():
             return
+
+        t2 = 0.0
         # --------------------------------------------------------
         # 2. Retrieve context
         # --------------------------------------------------------
-        context_data = self.memory.get_raw_context(
-            user_input,
-            k=20,
-            top_n=8,
-            exclude_chat_id=self.current_chat_id,
-        )
-        t2 = time.perf_counter()
-        print(
-            f"[TIMING] memory retrieval: "
-            f"{t2 - t1:.3f}s"
-        )
-        if ctx.cancel_event.is_set():
-            return
-        recent_history = "\n".join(
-            context_data["history"][-6:]
-        )
+        if self.llm.tool_controller.estimate_tokens(user_input) <= 2000:
+            context_data = self.memory.get_raw_context(
+                user_input,
+                k=20,
+                top_n=8,
+                exclude_chat_id=self.current_chat_id,
+            )
+
+            t2 = time.perf_counter()
+            print(
+                f"[TIMING] memory retrieval: "
+                f"{t2 - t1:.3f}s"
+            )
+            if ctx.cancel_event.is_set():
+                return
+            recent_history = "\n".join(
+                context_data["history"][-6:]
+            )
+            user_profile = (
+                        context_data.get("profile_summary")
+                        or ""
+                    )
+            
+        else:
+            user_profile = self.memory.get_profile_summary
+            recent_history = None
+
         current_chat_context = self.form_short_term_memory()
-        user_profile = (
-            context_data.get("profile_summary")
-            or ""
-        )
+        
         # --------------------------------------------------------
         # 3. Prompt
         # --------------------------------------------------------
