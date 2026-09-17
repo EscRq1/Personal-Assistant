@@ -526,10 +526,18 @@ class Main:
                 or not isinstance(content, str)
             ):
                 continue
+
+            for item in messages[-MAX_LAST_TURNS:]:
+                if self.llm.tool_controller.estimate_tokens(item) > MAX_TURN_TOKENS:
+                    continue
+                role = item.get("role", "unknown").title()
+                content = item.get("content", "")
+
             restored.append({
                 "role": role,
                 "content": content,
             })
+            
         self.short_term_memory = restored
         self.chat_initialized = True
         self.short_term_generation = len(restored)
@@ -623,7 +631,7 @@ class Main:
                     )
             
         else:
-            user_profile = self.memory.get_profile_summary
+            user_profile = self.memory.get_profile_summary()
             recent_history = None
 
         current_chat_context = self.form_short_term_memory()
@@ -1058,6 +1066,8 @@ async def ask(request: Request):
                         "title": raw_metadata.get("title", "Chat"),
                         "snippet": raw_metadata.get("snippet", ""),
                     }
+
+                    assistant.compacted_short_term_memory = raw_metadata.get("compacted_data", "")
 
                     print(
                         f"{Fore.CYAN}"
