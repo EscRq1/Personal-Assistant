@@ -238,6 +238,37 @@ TOOLS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_current_chat",
+            "description": (
+                "Search the complete current conversation for earlier turns "
+                "that are relevant to the request. Use this when information "
+                "was discussed earlier in THIS chat but is outside the visible "
+                "recent context. The tool searches the current chat only; it "
+                "does not search previous conversations or persistent memory. "
+                "Use a concise natural-language description of what you need. "
+                "The result preserves chronological turn boundaries and turn "
+                "indices."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "request": {
+                        "type": "string",
+                        "description": (
+                            "Describe the specific information, decision, "
+                            "discussion, or earlier detail you need to find "
+                            "in the current conversation."
+                        )
+                    }
+                },
+                "required": ["request"],
+                "additionalProperties": False
+            }
+        }
+    },
 ]
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}

@@ -7,6 +7,7 @@ import socket
 
 
 from tools.web_search import web_lookup
+from tools.current_chat_search import search_current_chat
 
 from tools.tool_registry import (
     get_registered_tools,
@@ -80,6 +81,11 @@ class Controller:
                 "write_notebook",
                 self.memmgr.write_to_notebook,
             )
+
+        register_tool(
+            "search_current_chat",
+            search_current_chat
+        )
         
 
         register_control_tool("call_coder")
@@ -2183,6 +2189,7 @@ class ExecutionContext:
         self.assistant_thinking_budget = None
         self.coder_thinking_mode = ""
         self.coder_thinking_budget = None
+
 
     def begin_llm(self):
         self.llm_done.clear()
