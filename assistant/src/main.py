@@ -20,6 +20,7 @@ from fastapi.responses import (
 from colorama import Fore, init
 from assistant import Controller, ExecutionContext
 from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
+from tools.current_chat_search import set_current_chat, clear_current_chat
 
 app = FastAPI()
 
@@ -79,8 +80,8 @@ class Main:
         # Model-facing compressed representation of rolled-over raw memory.
         self.compacted_short_term_memory = ""
 
-        # Archived raw blocks used to reconstruct the complete chat on save.
-        self.saved_turns = []
+        # Archived canonical turns keyed by their turn index.
+        self.saved_turns = {}
 
         # Background Observer compaction state.
         self.pending_compaction_blocks = []
@@ -155,9 +156,17 @@ class Main:
             )
 
         return "\n\n".join(sections)
+    
+    def _refresh_current_chat_index(self):
+        turns = list(self.saved_turns.values())
+        turns.extend(self.short_term_memory)
+        turns.sort(key=lambda entry: entry["index"])
+        set_current_chat(turns)
 
     def reset_chat_state(self):
         """Reset all transient conversation state."""
+
+        clear_current_chat()
 
         self.chat_state_generation += 1
 
@@ -186,7 +195,10 @@ class Main:
             return None
 
         rolled_over = list(self.short_term_memory)
-        self.saved_turns.append(rolled_over)
+
+        for entry in rolled_over:
+            self.saved_turns[entry["index"]] = entry
+
         self.short_term_memory.clear()
         self.short_term_generation += 1
 
@@ -458,7 +470,7 @@ class Main:
             try:
                 parsed = json.loads(cleaned)
             except json.JSONDecodeError:
-                match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+                match = re.search(r"**\{**.***\}**", cleaned, re.DOTALL)
 
                 if not match:
                     return {
@@ -649,10 +661,17 @@ class Main:
         live_turns = turns[split_index:]
 
         if archived_turns:
-            self.saved_turns = [archived_turns]
+            self.saved_turns = {
+                entry["index"]: entry
+                for entry in archived_turns
+            }
 
         self.short_term_memory = live_turns
+
+        self._refresh_current_chat_index()
+
         self.chat_initialized = True
+
         self.short_term_generation = len(live_turns)
 
         print(
@@ -673,6 +692,8 @@ class Main:
             raise ValueError(
                 "ExecutionContext is required for process_query()."
             )
+
+        self._refresh_current_chat_index()
 
         user_text_original = user_input
 
@@ -892,6 +913,8 @@ class Main:
 
         self.short_term_generation += 1
         self.memory_overflow_observer()
+
+        self._refresh_current_chat_index()
 
         # Defer profile extraction until app save/shutdown.
         # Keep only the clean original user text.
@@ -1302,11 +1325,7 @@ def finalize_session(chat_id=None):
     """Persist saved_turns + current short-term memory as one canonical chat."""
 
     with assistant.finalize_lock:
-        turns = []
-
-        for block in assistant.saved_turns:
-            turns.extend(block)
-
+        turns = list(assistant.saved_turns.values())
         turns.extend(assistant.short_term_memory)
         turns = extract_turns(turns)
         turns.sort(key=lambda entry: entry["index"])
