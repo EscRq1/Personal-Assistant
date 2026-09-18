@@ -504,34 +504,39 @@ class Main:
     def seed_from_chat_document(self, document: str):
         """Restore a canonical JSON chat document into live short-term memory."""
         self.reset_chat_state()
+        
         if not document or not isinstance(document, str):
             print("[Chat restore] Empty chat document.")
             return False
+        
         try:
             messages = json.loads(document)
+
         except json.JSONDecodeError as exc:
             print(f"[Chat restore] Invalid chat JSON: {exc}")
             return False
+        
         if not isinstance(messages, list):
             print("[Chat restore] Chat document is not a message list.")
             return False
+        
         restored = []
-        for message in messages:
-            if not isinstance(message, dict):
+
+        for item in messages[-MAX_LAST_TURNS:]:
+            if not isinstance(item, dict):
                 continue
-            role = message.get("role")
-            content = message.get("content")
+
+            role = item.get("role")
+            content = item.get("content")
+
             if (
                 role not in {"user", "assistant"}
                 or not isinstance(content, str)
             ):
                 continue
 
-            for item in messages[-MAX_LAST_TURNS:]:
-                if self.llm.tool_controller.estimate_tokens(item) > MAX_TURN_TOKENS:
-                    continue
-                role = item.get("role", "unknown").title()
-                content = item.get("content", "")
+            if self.llm.tool_controller.estimate_tokens(item) > MAX_TURN_TOKENS:
+                continue
 
             restored.append({
                 "role": role,
