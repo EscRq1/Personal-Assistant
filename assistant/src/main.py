@@ -44,10 +44,9 @@ MEMORY_IMAGES_DIR = os.path.abspath(
 )
 
 MAX_TURN_TOKENS = 10000
-
 MAX_LAST_TURNS = 12
+MEMORY_TOKENS = 30000
 
-MAX_MEMORY_TOKENS = 30000
 
 class Main:
     def __init__(self):
@@ -504,7 +503,7 @@ class Main:
     def seed_from_chat_document(self, document: str):
         """Restore a canonical JSON chat document into live short-term memory."""
         self.reset_chat_state()
-        
+
         if not document or not isinstance(document, str):
             print("[Chat restore] Empty chat document.")
             return False
@@ -1186,20 +1185,24 @@ def finalize_session(chat_id=None):
                 "status": "ignored",
                 "message": "No memory to save",
             }, 200
+        
         full_transcript = json.dumps(
             messages_to_save,
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
         summary_transcript = "\n".join(
             f"{message['role'].title()}: {message['content']}"
-            for message in messages_to_save
+            for message in messages_to_save[-MAX_LAST_TURNS:]
         )
+
         effective_chat_id = (
             chat_id
             or assistant.current_chat_id
             or ""
         ).strip() or None
+        
         existing_meta = {}
         if effective_chat_id:
             try:
