@@ -1765,13 +1765,7 @@ class ToolController:
     # ========================================================
     # BUILD ASSISTANT TOOL-CALL MESSAGE
     # ========================================================
-    def estimate_tokens(self, text) -> int:
-        """
-        Rough token estimate for budgeting only.
-
-        This is intentionally conservative enough for preventing
-        context explosions. It is not used for model billing.
-        """
+    def estimate_tokens(self, text, tokenizer=None) -> int:
         if text is None:
             return 0
 
@@ -1788,7 +1782,11 @@ class ToolController:
         if not text:
             return 0
 
-        return max(1, len(text) // 4)
+        if tokenizer is not None:
+            return len(tokenizer.encode(text))
+
+        # Conservative fallback
+        return max(1, (len(text) + 2) // 3)
     
     def compress_web_batch(
         self,
