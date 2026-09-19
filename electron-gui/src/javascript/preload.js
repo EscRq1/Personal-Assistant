@@ -25,17 +25,47 @@ window.addEventListener('DOMContentLoaded', () => {
 // KaTeX
 // ============================================================
 
+function normalizeLatex(s) {
+    // Strip empty or whitespace-only boxed/fbox — the source of your zero-width vertical line
+    s = s.replace(/\\(?:boxed|fbox|fbox\*|bbox\*?)\s*\{\s*\}/g, '');
+
+    // Strip empty \sqrt{} (renders as a bare √ with no content)
+    s = s.replace(/\\sqrt\s*\[\s*\]\s*\{\s*\}/g, '');
+    s = s.replace(/\\sqrt\s*\{\s*\}/g, '');
+
+    // Strip empty environments / matrices with no rows
+    s = s.replace(/\\begin\{[a-zA-Z]*matrix\*?\}\s*\\end\{[a-zA-Z]*matrix\*?\}/g, '');
+
+    // Collapse accidental double-escaped backslashes (\\frac → \frac)
+    // Only when the double-backslash is immediately followed by a known command letter
+    s = s.replace(/\\\\([a-zA-Z]+)/g, '\\$1');
+
+    // Trim leading/trailing whitespace
+    return s.trim();
+}
+
 function renderMath(text, displayMode) {
     try {
-        return katex.renderToString(text, {
+        const clean = normalizeLatex(text);
+
+        // If normalization stripped everything (e.g. text was just "\boxed{}"),
+        // don't render an empty equation — return a subtle placeholder.
+        if (!clean) {
+            return displayMode
+                ? '<div class="math-bubble"><span class="math-empty"></span></div>'
+                : '<span class="math-empty"></span>';
+        }
+
+        return katex.renderToString(clean, {
             displayMode,
             throwOnError: false,
-            strict: false
+            strict: false,
+            output: 'html',          // skip MathML — no a11y layer needed in Electron, kills the leak vector
+            trust: false,
+            macros: {},
         });
     } catch (error) {
         console.error('[KaTeX] render failed:', error);
-
-        // Preserve the original expression rather than destroying it.
         return displayMode
             ? `<div class="math-bubble math-error">${escapeHtml(text)}</div>`
             : `<span class="math-error">${escapeHtml(text)}</span>`;
