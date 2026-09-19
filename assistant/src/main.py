@@ -119,7 +119,7 @@ class Main:
 
     def form_short_term_memory(self):
         """Build the model-facing short-term context."""
-
+        print(f"{Fore.CYAN}[DEBUG] Forming a memory injection for the model")
         sections = []
 
         if self.compacted_short_term_memory:
@@ -133,8 +133,10 @@ class Main:
 
         for entry in turns[-MAX_LAST_TURNS:]:
             turn = entry["turn"]
+            print(f"Turn token length: {self.llm.tool_controller.estimate_tokens(turn)}")
 
             if self.llm.tool_controller.estimate_tokens(turn) > MAX_TURN_TOKENS:
+                print(f"Turn token cap exceeded: {self.llm.tool_controller.estimate_tokens(turn)}")
                 continue
 
             for item in turn:
@@ -464,21 +466,19 @@ class Main:
             model="Observer",
         )
 
+
         try:
             cleaned = (raw_output or "").strip()
+            print(cleaned)
 
-            try:
-                parsed = json.loads(cleaned)
-            except json.JSONDecodeError:
-                match = re.search(r"**\{**.***\}**", cleaned, re.DOTALL)
+            # Remove Markdown code fences if the model wrapped the JSON.
+            if cleaned.startswith("```"):
+                cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
+                cleaned = re.sub(r"\s*```$", "", cleaned)
 
-                if not match:
-                    return {
-                        "title": "Chat",
-                        "snippet": "Processing...",
-                    }
+            parsed = json.loads(cleaned)
 
-                parsed = json.loads(match.group(0))
+        
 
             if not isinstance(parsed, dict):
                 return {
@@ -495,11 +495,11 @@ class Main:
                 ),
             }
 
-        except Exception as e:
-            print(f"JSON Parse Error: {e}")
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
+            print(f"[Summary] Invalid JSON from Observer: {e}")
             return {
-                "title": "Error",
-                "snippet": "Could not summarize",
+                "title": "Chat",
+                "snippet": "Processing...",
             }
 
     # ============================================================
