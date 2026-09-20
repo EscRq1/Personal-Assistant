@@ -7,7 +7,10 @@ import socket
 
 
 from tools.web_search import web_lookup
-from tools.current_chat_search import search_current_chat
+from tools.current_chat_search import (
+    search_current_chat,
+    get_chat_turn
+)
 
 from tools.tool_registry import (
     get_registered_tools,
@@ -24,6 +27,7 @@ from colorama import Fore
 from resource_manager import resource_manager
 from memory_manager import memory_manager
 from llama_server_manager import LlamaRouterManager
+from tools.estimate_tokens import estimate_tokens
 
 
 MAX_ITERATIONS = 8
@@ -85,6 +89,11 @@ class Controller:
         register_tool(
             "search_current_chat",
             search_current_chat
+        )
+
+        register_tool(
+            "get_chat_turn",
+            get_chat_turn
         )
         
 
@@ -1765,28 +1774,6 @@ class ToolController:
     # ========================================================
     # BUILD ASSISTANT TOOL-CALL MESSAGE
     # ========================================================
-    def estimate_tokens(self, text, tokenizer=None) -> int:
-        if text is None:
-            return 0
-
-        if not isinstance(text, str):
-            try:
-                text = json.dumps(
-                    text,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            except (TypeError, ValueError):
-                text = str(text)
-
-        if not text:
-            return 0
-
-        if tokenizer is not None:
-            return len(tokenizer.encode(text))
-
-        # Conservative fallback
-        return max(1, (len(text) + 2) // 3)
     
     def compress_web_batch(
         self,
@@ -1860,7 +1847,7 @@ class ToolController:
 
         combined = "\n\n".join(sections)
 
-        token_estimate = self.estimate_tokens(
+        token_estimate = estimate_tokens(
             combined
         )
 

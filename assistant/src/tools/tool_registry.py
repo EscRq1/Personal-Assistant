@@ -239,18 +239,22 @@ TOOLS = [
         },
     },
     {
-        "type": "function",
-        "function": {
-            "name": "search_current_chat",
-            "description": (
-                "Search the complete current conversation for earlier turns "
-                "that are relevant to the request. Use this when information "
-                "was discussed earlier in THIS chat but is outside the visible "
-                "recent context. The tool searches the current chat only; it "
-                "does not search previous conversations or persistent memory. "
-                "Use a concise natural-language description of what you need. "
-                "The result preserves chronological turn boundaries and turn "
-                "indices."
+    "type": "function",
+    "function": {
+        "name": "search_current_chat",
+        "description": (
+            "Search the complete current conversation for earlier turns "
+            "that are relevant to the request. Use this when information "
+            "was discussed earlier in THIS chat but is outside the visible "
+            "recent context. The tool searches the current chat only; it "
+            "does not search previous conversations or persistent memory. "
+            "Use a concise natural-language description of what you need. "
+            "The result preserves chronological turn boundaries and turn "
+            "indices. You control how much context to retrieve by choosing "
+            "max_tokens. Prefer a smaller budget for a specific lookup and "
+            "a larger budget when you need broader surrounding discussion. "
+            "If the result is truncated, you can call the tool again with "
+            "a larger max_tokens value or with a more specific request."
             ),
             "parameters": {
                 "type": "object",
@@ -262,10 +266,55 @@ TOOLS = [
                             "discussion, or earlier detail you need to find "
                             "in the current conversation."
                         )
+                    },
+                    "tokens": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of tokens of conversation context to return. "
+                            "Choose the budget based on how much context you expect to need."
+                        ),
+                        "minimum": 500,
+                        "maximum": 30000
                     }
                 },
-                "required": ["request"],
-                "additionalProperties": False
+                "required": ["request", "tokens"],
+            }
+        }
+    },
+    {
+    "type": "function",
+    "function": {
+        "name": "get_chat_turn",
+        "description": (
+            "Retrieve a specific turn from the current conversation by its "
+            "index. Use this when search_current_chat identified a relevant "
+            "turn index (via matched_turns or skipped_turns) but did not "
+            "return its full content. The index is 0-based and refers to "
+            "the turn position in the current chat."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "turn_index": {
+                        "type": "integer",
+                        "description": (
+                            "The 0-based index of the turn to retrieve. "
+                            "This index comes from search_current_chat results."
+                        )
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum number of tokens to return. "
+                            "If the turn is longer, it will be truncated. "
+                            "Default is 8000."
+                        ),
+                        "minimum": 500,
+                        "maximum": 30000,
+                        "default": 8000
+                    }
+                },
+                "required": ["turn_index"]
             }
         }
     },
