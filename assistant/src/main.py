@@ -110,6 +110,10 @@ class Main:
         # Protect the active generation context used by /stop.
         self.generation_lock = threading.Lock()
 
+        # Protect the compaction queue shared by the generation worker and
+        # the FastAPI event loop.
+        self.compaction_lock = threading.Lock()
+
         # Request-scoped context for the currently active generation.
         self.generation_context = None
 
@@ -188,11 +192,17 @@ class Main:
 
         task = self.compaction_task
 
-        if task is not None and not task.done():
-            task.cancel()
+        if task is not None:
+            # The task belongs to the FastAPI loop. reset_chat_state() can be
+            # reached from a worker thread during finalization.
+            if self.api_loop is not None:
+                self.api_loop.call_soon_threadsafe(task.cancel)
+            else:
+                task.cancel()
 
-        self.compaction_task = None
-        self.pending_compaction_blocks.clear()
+        with self.compaction_lock:
+            self.compaction_task = None
+            self.pending_compaction_blocks.clear()
         self.short_term_memory.clear()
         self.saved_turns.clear()
         self.compacted_short_term_memory = ""
@@ -223,11 +233,20 @@ class Main:
     async def compact_short_term_memory(self, ctx, chat_state_generation):
         """Background Observer worker. Pending raw blocks are processed in order."""
 
-        while self.pending_compaction_blocks:
-            if chat_state_generation != self.chat_state_generation or ctx.cancel_event.is_set():
+        while True:
+            if chat_state_generation != self.chat_state_generation:
                 return
 
-            blocks = self.pending_compaction_blocks
+            with self.compaction_lock:
+                if not self.pending_compaction_blocks:
+                    return
+                blocks = self.pending_compaction_blocks
+                self.pending_compaction_blocks = []
+
+            if ctx.cancel_event.is_set():
+                with self.compaction_lock:
+                    self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
+                return
 
             rolled_lines = []
 
@@ -276,8 +295,8 @@ class Main:
                     f"NEW ROLLED-OVER TURNS:\n{transcript}"
                 )
 
-        else:
-            prompt = (
+            else:
+                prompt = (
                 "Summarize the previous conversation for a personal assistant.\n\n"
 
                 "Preserve information that may be necessary to continue the conversation accurately, especially:\n"
@@ -317,76 +336,95 @@ class Main:
                     ctx=ctx,
                 ):
                     if ctx.cancel_event.is_set() or chat_state_generation != self.chat_state_generation:
+                        if chat_state_generation == self.chat_state_generation:
+                            with self.compaction_lock:
+                                self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
                         return
 
                     parts.append(token)
 
             except asyncio.CancelledError:
+                if chat_state_generation == self.chat_state_generation:
+                    with self.compaction_lock:
+                        self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
                 raise
 
             except Exception as exc:
-                self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
+                with self.compaction_lock:
+                    self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
                 print(f"[MEMORY] Short-term compaction failed: {type(exc).__name__}: {exc}")
                 return
 
             summary = "".join(parts).strip()
 
             if not summary:
-                self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
+                with self.compaction_lock:
+                    self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
                 print("[MEMORY] Observer produced an empty compaction summary.")
                 return
 
             if chat_state_generation != self.chat_state_generation or ctx.cancel_event.is_set():
+                if chat_state_generation == self.chat_state_generation:
+                    with self.compaction_lock:
+                        self.pending_compaction_blocks = blocks + self.pending_compaction_blocks
                 return
-            
-            self.pending_compaction_blocks = []
+
+            # Blocks detached above are now committed. Any newer blocks are
+            # still in pending_compaction_blocks and will be processed next.
             self.compacted_short_term_memory = summary
             self.compaction_generation += 1
 
             print(f"[MEMORY] Short-term memory compacted (generation={self.compaction_generation}, summary_tokens={estimate_tokens(summary)})")
 
-    def schedule_memory_compaction(self, rolled_over_memory):
-        """Queue a raw block for background Observer compaction."""
+    def _ensure_compaction_task(self):
+        """Ensure queued compaction work has a worker on the FastAPI loop."""
 
-        if not rolled_over_memory:
-            return
-
-        self.pending_compaction_blocks.append(rolled_over_memory)
-
-        if (
-            self.compaction_task is not None
-            and not self.compaction_task.done()
-        ):
-            print(
-                "[MEMORY] Compaction already running; "
-                "queued another rolled-over block."
-            )
+        if self.api_loop is None:
             return
 
         generation = self.chat_state_generation
 
         def create_task():
-            ctx = ExecutionContext()
-            self.compaction_context = ctx
+            with self.compaction_lock:
+                if not self.pending_compaction_blocks:
+                    return
 
-            self.compaction_task = asyncio.create_task(
-                self.compact_short_term_memory(
-                    chat_state_generation=generation,
-                    ctx=ctx,
+                if (
+                    self.compaction_task is not None
+                    and not self.compaction_task.done()
+                ):
+                    return
+
+                ctx = ExecutionContext()
+                self.compaction_context = ctx
+
+                self.compaction_task = asyncio.create_task(
+                    self.compact_short_term_memory(
+                        chat_state_generation=generation,
+                        ctx=ctx,
+                    )
                 )
-            )
 
-            self.compaction_task.add_done_callback(
-                self._memory_compaction_done
-            )
+                self.compaction_task.add_done_callback(
+                    self._memory_compaction_done
+                )
 
-        #schedule this task to the fastapi's event loop in another thread,
-        #so it won't be cancelled alongside the generation thread        
+        # Task creation and Task.done() inspection happen on the FastAPI
+        # event loop that owns the task.
         self.api_loop.call_soon_threadsafe(create_task)
+
+    def schedule_memory_compaction(self, rolled_over_memory):
+        """Queue a raw block for background Observer compaction."""
+
+        if rolled_over_memory:
+            with self.compaction_lock:
+                self.pending_compaction_blocks.append(rolled_over_memory)
+
+        self._ensure_compaction_task()
 
         print(
             "[MEMORY] Background compaction scheduled "
-            f"(chat_generation={generation})"
+            f"(chat_generation={self.chat_state_generation})"
         )
 
     def memory_overflow_observer(self):
@@ -439,15 +477,23 @@ class Main:
         # Any blocks still pending were never successfully committed
         # into compacted_short_term_memory, so move them back from the
         # archived store into short-term memory.
-        for block in self.pending_compaction_blocks:
+        with self.compaction_lock:
+            pending_blocks = self.pending_compaction_blocks
+            self.pending_compaction_blocks = []
+
+        restored_entries = []
+        for block in pending_blocks:
             for entry in block:
                 self.saved_turns.pop(entry["index"], None)
-                self.short_term_memory.append(entry)
+                restored_entries.append(entry)
 
-        self.pending_compaction_blocks.clear()
+        if restored_entries:
+            self.short_term_memory.extend(restored_entries)
+            self.short_term_memory.sort(key=lambda entry: entry["index"])
 
-        self.compaction_task = None
-        self.compaction_context = None
+        with self.compaction_lock:
+            self.compaction_task = None
+            self.compaction_context = None
 
     def _memory_compaction_done(self, task):
         try:
@@ -460,9 +506,20 @@ class Main:
                 f"{type(exc).__name__}: {exc}"
             )
         finally:
-            if self.compaction_task is task:
-                self.compaction_task = None
-                self.compaction_context = None
+            with self.compaction_lock:
+                owns_task = self.compaction_task is task
+                task_ctx = self.compaction_context if owns_task else None
+                if owns_task:
+                    self.compaction_task = None
+                    self.compaction_context = None
+                    pending = bool(self.pending_compaction_blocks)
+                else:
+                    pending = False
+
+            # A canceled compaction is being explicitly drained by save/shutdown
+            # or reset. Do not immediately start another worker in that case.
+            if pending and not (task_ctx and task_ctx.cancel_event.is_set()):
+                self._ensure_compaction_task()
 
     def run_llm_sync(
         self,
@@ -907,6 +964,7 @@ class Main:
         # --------------------------------------------------------
 
         self.current_turn += 1
+        turn_id = self.current_turn
 
         llm_stream = self.llm.ask(
             user_input,
@@ -921,7 +979,6 @@ class Main:
         try:
             async for token in llm_stream:
                 if ctx.cancel_event.is_set():
-                    self.current_turn -= 1
                     break
 
                 full_response += token
@@ -963,7 +1020,7 @@ class Main:
         })
 
         self.short_term_memory.append({
-            "index": self.current_turn,
+            "index": turn_id,
             "turn": pending
         })
 
@@ -1025,7 +1082,7 @@ def normalize_pin_value(value) -> int:
 _GENERATION_FINISHED = object()
 
 
-def _run_async_generation(async_generator, output_queue):
+def _run_async_generation(async_generator, output_queue, ctx, on_finished=None):
     """Consume one async generation stream in a dedicated event loop."""
 
     async def consume():
@@ -1039,10 +1096,19 @@ def _run_async_generation(async_generator, output_queue):
         finally:
             output_queue.put(("done", _GENERATION_FINISHED))
 
-    asyncio.run(consume())
+    try:
+        asyncio.run(consume())
+    finally:
+        # The logical generation is complete only after the async generator
+        # has fully unwound, including Controller.ask() cleanup/restart.
+        try:
+            if on_finished is not None:
+                on_finished(ctx)
+        finally:
+            ctx.generation_done.set()
 
 
-def stream_async_generator(async_generator, ctx):
+def stream_async_generator(async_generator, ctx, on_finished=None):
     """
     Bridge an async generation stream into a synchronous iterator.
     FastAPI/Starlette can consume a normal synchronous iterable for
@@ -1055,7 +1121,7 @@ def stream_async_generator(async_generator, ctx):
 
     worker = threading.Thread(
         target=_run_async_generation,
-        args=(async_generator, output_queue),
+        args=(async_generator, output_queue, ctx, on_finished),
         daemon=True,
     )
     worker.start()
@@ -1128,7 +1194,10 @@ async def stop_active_generation(timeout=5.0):
     ctx.cancel_event.set()
 
     try:
-        await asyncio.wait_for(asyncio.to_thread(ctx.llm_done.wait), timeout=timeout)
+        await asyncio.wait_for(
+            asyncio.to_thread(ctx.generation_done.wait),
+            timeout=timeout,
+        )
         return True
     except asyncio.TimeoutError:
         print("[Server] Active generation did not stop within timeout.")
@@ -1236,6 +1305,18 @@ async def ask(request: Request):
 
     print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
 
+    # Reserve the singleton session before loading/switching chats.
+    # A second /ask must fail rather than touching global state concurrently.
+    with assistant.generation_lock:
+        if assistant.generation_context is not None:
+            return JSONResponse(
+                content={"error": "Another generation is already running."},
+                status_code=409,
+            )
+        ctx.generation_done.clear()
+        ctx.chat_id = chat_id or assistant.current_chat_id
+        assistant.generation_context = ctx
+
     # ------------------------------------------------------------
     # 2. Resolve chat identity
     # Never use short_term_memory emptiness to decide whether the chat is
@@ -1246,9 +1327,6 @@ async def ask(request: Request):
             chat_id != assistant.current_chat_id
             or not assistant.chat_initialized
         ):
-            if not await stop_active_generation():
-                return JSONResponse(content={"error": "Active generation is still running."}, status_code=409)
-
             try:
                 legacy = await asyncio.to_thread(
                     assistant.memory.history.get,
@@ -1268,6 +1346,10 @@ async def ask(request: Request):
                     restored = assistant.seed_from_chat_document(document)
 
                     if not restored:
+                        with assistant.generation_lock:
+                            if assistant.generation_context is ctx:
+                                assistant.generation_context = None
+                                ctx.generation_done.set()
                         return JSONResponse(
                             content={
                                 "error": "Stored chat could not be restored",
@@ -1297,6 +1379,10 @@ async def ask(request: Request):
                     )
 
                 else:
+                    with assistant.generation_lock:
+                        if assistant.generation_context is ctx:
+                            assistant.generation_context = None
+                            ctx.generation_done.set()
                     return JSONResponse(
                         content={
                             "error": "Chat not found",
@@ -1305,6 +1391,10 @@ async def ask(request: Request):
                     )
 
             except Exception as e:
+                with assistant.generation_lock:
+                    if assistant.generation_context is ctx:
+                        assistant.generation_context = None
+                        ctx.generation_done.set()
                 print(f"[Legacy seed error]: {e}")
                 return JSONResponse(
                     content={
@@ -1319,8 +1409,8 @@ async def ask(request: Request):
         assistant.reset_chat_state()
         assistant.chat_initialized = True
 
-    # 3. Create generation context
-
+    # 3. Create generation request. The session slot was reserved before
+    # chat restoration above.
     search = parse_bool(raw_search)
 
     print(
@@ -1331,8 +1421,7 @@ async def ask(request: Request):
     )
 
     # /stop cancels this exact logical Request.
-    with assistant.generation_lock:
-        assistant.generation_context = ctx
+    # The generation context was reserved before chat restoration.
 
     # ------------------------------------------------------------
     # 4. Flask-compatible detached generation bridge
@@ -1345,11 +1434,17 @@ async def ask(request: Request):
         ctx=ctx,
     )
 
+    def on_generation_finished(finished_ctx):
+        with assistant.generation_lock:
+            if assistant.generation_context is finished_ctx:
+                assistant.generation_context = None
+
     def generate():
         try:
             for token in stream_async_generator(
                 async_generator,
                 ctx,
+                on_finished=on_generation_finished,
             ):
                 if ctx.cancel_event.is_set():
                     return
@@ -1360,11 +1455,6 @@ async def ask(request: Request):
             print("[Server] Client disconnected")
             ctx.cancel_event.set()
             raise
-
-        finally:
-            with assistant.generation_lock:
-                if assistant.generation_context is ctx:
-                    assistant.generation_context = None
 
     return StreamingResponse(
         generate(),
@@ -1381,6 +1471,16 @@ def finalize_session(chat_id=None):
     """Persist saved_turns + current short-term memory as one canonical chat."""
 
     with assistant.finalize_lock:
+        if (
+            chat_id
+            and assistant.current_chat_id
+            and chat_id != assistant.current_chat_id
+        ):
+            return {
+                "status": "error",
+                "message": "Requested chat_id does not match the active chat.",
+            }, 409
+
         turns = list(assistant.saved_turns.values())
         turns.extend(assistant.short_term_memory)
         turns = extract_turns(turns)
@@ -1889,6 +1989,21 @@ async def delete(request: Request):
         or ""
     ).strip()
 
+    with assistant.generation_lock:
+        active_ctx = assistant.generation_context
+        active_chat_id = getattr(active_ctx, "chat_id", None) if active_ctx else None
+
+    if active_chat_id == chat_id or assistant.current_chat_id == chat_id:
+        if not await stop_active_generation(timeout=8.0):
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "Active generation did not stop.",
+                },
+                status_code=409,
+            )
+        await assistant.stop_memory_compaction()
+
     ok = await asyncio.to_thread(
         assistant.memory.delete_history,
         chat_id,
@@ -2078,4 +2193,3 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=5000,
     )
-

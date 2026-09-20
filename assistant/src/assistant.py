@@ -1391,16 +1391,22 @@ class Controller:
         request: str,
     ) -> str:
         """
-        Explicit memory retrieval.
+        Explicit long-term memory retrieval.
 
-        Chroma produces a small candidate set.
-        Observer selects the actually relevant memories.
+        Pipeline:
+            hybrid Chroma + FTS recall
+                -> Observer relevance filtering
+                -> bounded structured result
+
+        Observer is a relevance layer, not a database-existence gate.
         """
 
         ctx = _execution_context.get()
 
         if ctx and ctx.cancel_event.is_set():
-            return json.dumps({"error": "Request cancelled."})
+            return json.dumps({
+                "error": "Request cancelled."
+            })
 
         if self.memmgr is None:
             return json.dumps({
@@ -1420,10 +1426,10 @@ class Controller:
         )
 
         # ========================================================
-        # 1. Chroma candidate generation
+        # 1. Hybrid candidate generation
         # ========================================================
 
-        candidates = self.memmgr.get_memory_candidates(
+        candidates = self.memmgr.get_memory_candidates_detailed(
             query=request,
             conversation_limit=5,
             turns_per_conversation=6,
@@ -1447,29 +1453,32 @@ class Controller:
         # ========================================================
 
         candidate_text = "\n\n".join(
-            f"[MEMORY {index}]\n{candidate}"
+            (
+                f"[MEMORY {index}]\n"
+                f"chat_id={candidate.get('chat_id', '')}\n"
+                f"turn_index={candidate.get('turn_index', '')}\n"
+                f"title={candidate.get('title', '')}\n"
+                f"timestamp={candidate.get('timestamp', '')}\n"
+                f"text={candidate.get('text', '')}"
+            )
             for index, candidate in enumerate(candidates)
         )
 
         observer_prompt = (
-            "You are a memory retrieval filter for another "
-            "language model.\n\n"
-
-            "The requesting model needs historical information "
-            "from previous conversations.\n\n"
-
-            "Select ONLY the memories that are directly useful "
-            "for answering the memory request.\n\n"
+            "You are a relevance filter for historical conversation memory.\n\n"
+            "The parent assistant needs information from previous "
+            "conversations. Select candidate memories that are useful "
+            "for answering the request.\n\n"
 
             "Rules:\n"
-            "- Do not answer the request yourself.\n"
-            "- Do not invent missing information.\n"
-            "- Do not select memories merely because they contain "
-            "similar words.\n"
-            "- Prefer memories that contain the actual fact, decision, "
-            "event, technical discussion, or context requested.\n"
-            "- It is better to return too few memories than irrelevant ones.\n"
-            "- Select at most 8 memories.\n"
+            "- Use candidate text as the primary evidence.\n"
+            "- Metadata is supporting context only.\n"
+            "- Do not invent facts that are not in the candidates.\n"
+            "- Do not require an exact word-for-word match.\n"
+            "- Select candidates when they plausibly contain the requested "
+            "event, fact, or context.\n"
+            "- Prefer recall over excessive strictness.\n"
+            "- Select at most 8 candidates.\n"
             "- Return ONLY valid JSON.\n\n"
 
             "Required format:\n"
@@ -1485,29 +1494,31 @@ class Controller:
             prompt=observer_prompt,
             ctx=ctx,
             system_prompt=(
-                "Select relevant historical memory entries. "
+                "Select relevant historical memory candidates. "
                 "Return only valid JSON."
             ),
             max_tokens=1024,
         )
 
         if ctx and ctx.cancel_event.is_set():
-            return json.dumps({"error": "Request cancelled."})
+            return json.dumps({
+                "error": "Request cancelled."
+            })
 
         # ========================================================
         # 3. Parse Observer selection
         # ========================================================
 
+        selected_indices = []
+
         try:
-            cleaned = raw_selection.strip()
+            cleaned = (raw_selection or "").strip()
 
             start = cleaned.find("{")
             end = cleaned.rfind("}")
 
-            if start != -1 and end != -1:
-                cleaned = cleaned[
-                    start:end + 1
-                ]
+            if start != -1 and end != -1 and end > start:
+                cleaned = cleaned[start:end + 1]
 
             selection = json.loads(cleaned)
 
@@ -1531,16 +1542,9 @@ class Controller:
                 f"selection: {exc}"
             )
 
-            return json.dumps(
-                {
-                    "query": request,
-                    "found": False,
-                    "message": (
-                        "Memory filtering failed."
-                    ),
-                },
-                ensure_ascii=False,
-            )
+            # Retrieval already succeeded. Do not turn an Observer
+            # formatting failure into "no memories exist".
+            selected_indices = []
 
         # ========================================================
         # 4. Validate indices
@@ -1549,32 +1553,32 @@ class Controller:
         selected = []
 
         for index in selected_indices:
-
-            if not isinstance(
-                index,
-                int,
-            ):
+            if not isinstance(index, int):
                 continue
 
             if index < 0 or index >= len(candidates):
                 continue
 
-            selected.append(
-                candidates[index]
-            )
+            selected.append(candidates[index])
 
             if len(selected) >= 8:
                 break
 
-        if not selected:
+        selection_mode = "observer"
 
+        # Observer selecting nothing is not equivalent to retrieval
+        # finding nothing. Return a small fallback set.
+        if not selected:
+            selected = candidates[:3]
+            selection_mode = "retrieval_fallback"
+
+        if not selected:
             return json.dumps(
                 {
                     "query": request,
                     "found": False,
                     "message": (
-                        "No sufficiently relevant historical "
-                        "memory was selected."
+                        "No historical memory candidates were found."
                     ),
                 },
                 ensure_ascii=False,
@@ -1589,37 +1593,53 @@ class Controller:
         output = []
         total_chars = 0
 
-        for memory in selected:
-
-            remaining = (
-                MAX_MEMORY_CHARS
-                - total_chars
-            )
+        for candidate in selected:
+            remaining = MAX_MEMORY_CHARS - total_chars
 
             if remaining <= 0:
                 break
 
-            clipped = memory[:remaining]
+            text = str(
+                candidate.get("text") or ""
+            )
 
-            output.append(clipped)
+            clipped = text[:remaining]
             total_chars += len(clipped)
+
+            output.append({
+                "chat_id": candidate.get(
+                    "chat_id",
+                    "",
+                ),
+                "turn_index": candidate.get(
+                    "turn_index"
+                ),
+                "title": candidate.get(
+                    "title",
+                    "",
+                ),
+                "timestamp": candidate.get(
+                    "timestamp",
+                    "",
+                ),
+                "text": clipped,
+            })
 
         print(
             f"{Fore.GREEN}"
-            f"[MEMORY TOOL] selected "
-            f"{len(output)} memories"
+            f"[MEMORY TOOL] selected {len(output)} memories "
+            f"(mode={selection_mode})"
         )
 
         return json.dumps(
             {
                 "query": request,
-                "found": True,
+                "found": bool(output),
+                "selection_mode": selection_mode,
                 "memories": output,
             },
             ensure_ascii=False,
         )
-
-
 
 
 
@@ -2160,6 +2180,13 @@ class ExecutionContext:
         self.llm_active = threading.Event()
         self.llm_done = threading.Event()
         self.llm_done.set()
+
+        # Physical inference completion and logical request completion are
+        # different lifecycle events. /save and /stop wait on this barrier.
+        self.generation_done = threading.Event()
+        self.generation_done.set()
+        self.chat_id = None
+
         self.llm_phase = ""
 
         # Currently active requests.Response object, when available.

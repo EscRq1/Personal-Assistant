@@ -178,7 +178,12 @@ class MemoryManager:
 
     @staticmethod
     def _split_turns(document: str) -> list[str]:
-        """Convert a canonical JSON message list into searchable turn text."""
+        """
+        Convert the canonical chat document into searchable turn text.
+
+        Supports both the current turn-wrapped format and the older flat
+        role/content message format.
+        """
         if not document or not isinstance(document, str):
             return []
 
@@ -190,6 +195,61 @@ class MemoryManager:
         if not isinstance(messages, list):
             return []
 
+        # Current canonical format:
+        # [
+        #   {"index": 42, "turn": [
+        #       {"role": "user", "content": "..."},
+        #       {"role": "assistant", "content": "..."}
+        #   ]}
+        # ]
+        if any(
+            isinstance(item, dict)
+            and isinstance(item.get("turn"), list)
+            for item in messages
+        ):
+            turns = []
+
+            for entry in messages:
+                if not isinstance(entry, dict):
+                    continue
+
+                inner_messages = entry.get("turn")
+                if not isinstance(inner_messages, list):
+                    continue
+
+                lines = []
+
+                for message in inner_messages:
+                    if not isinstance(message, dict):
+                        continue
+
+                    role = message.get("role")
+                    content = message.get("content")
+
+                    if (
+                        role not in {"user", "assistant"}
+                        or not isinstance(content, str)
+                    ):
+                        continue
+
+                    content = content.strip()
+                    if not content:
+                        continue
+
+                    lines.append(
+                        f"{role.title()}: {content}"
+                    )
+
+                if lines:
+                    turns.append("\n".join(lines))
+
+            return [
+                turn.strip()
+                for turn in turns
+                if turn.strip()
+            ]
+
+        # Legacy flat format.
         turns = []
         pending_user = None
 
@@ -199,25 +259,46 @@ class MemoryManager:
 
             role = message.get("role")
             content = message.get("content")
-            if role not in {"user", "assistant"} or not isinstance(content, str):
+
+            if (
+                role not in {"user", "assistant"}
+                or not isinstance(content, str)
+            ):
+                continue
+
+            content = content.strip()
+            if not content:
                 continue
 
             if role == "user":
                 if pending_user is not None:
-                    turns.append(f"User: {pending_user}")
+                    turns.append(
+                        f"User: {pending_user}"
+                    )
                 pending_user = content
                 continue
 
             if pending_user is None:
-                turns.append(f"Assistant: {content}")
+                turns.append(
+                    f"Assistant: {content}"
+                )
             else:
-                turns.append(f"User: {pending_user}\nAssistant: {content}")
+                turns.append(
+                    f"User: {pending_user}\n"
+                    f"Assistant: {content}"
+                )
                 pending_user = None
 
         if pending_user is not None:
-            turns.append(f"User: {pending_user}")
+            turns.append(
+                f"User: {pending_user}"
+            )
 
-        return [turn.strip() for turn in turns if turn.strip()]
+        return [
+            turn.strip()
+            for turn in turns
+            if turn.strip()
+        ]
 
     def _delete_turn_index_for_chat(self, chat_id: str):
         if not chat_id:
@@ -250,20 +331,33 @@ class MemoryManager:
         document: str,
         metadata: dict | None = None,
     ) -> int:
-        """Rebuild the search index for one archived conversation."""
+        """Rebuild the retrieval index for one archived conversation."""
         chat_id = str(chat_id or "").strip()
         if not chat_id:
             return 0
 
         turns = self._split_turns(document)
-        self._delete_turn_index_for_chat(chat_id)
 
+        # Do not destroy an existing index when the source document is
+        # malformed or unsupported.
         if not turns:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] no searchable turns for chat {chat_id}; "
+                "existing index left untouched"
+            )
             return 0
+
+        # Only replace the old index after parsing succeeded.
+        self._delete_turn_index_for_chat(chat_id)
 
         metadata = dict(metadata or {})
         title = str(metadata.get("title") or "")
-        timestamp = str(metadata.get("timestamp") or "")
+        timestamp = str(
+            metadata.get("updated_at")
+            or metadata.get("timestamp")
+            or ""
+        )
         pinned = int(bool(metadata.get("pinned", 0)))
 
         ids = []
@@ -276,6 +370,7 @@ class MemoryManager:
                 turn_index,
                 turn,
             )
+
             ids.append(turn_id)
             documents.append(turn)
             metadatas.append({
@@ -306,17 +401,51 @@ class MemoryManager:
             f"{Fore.CYAN}"
             f"[MEMORY INDEX] indexed {len(turns)} turns for chat {chat_id}"
         )
+
         return len(turns)
 
-    def _ensure_turn_index(self):
-        """Migrate legacy chat-level records the first time turn indexing is enabled."""
-        try:
-            if self.memory_turns.count() > 0:
-                return
+    def _indexed_turn_counts(self, chat_id: str) -> tuple[int, int]:
+        """Return (Chroma turn count, FTS turn count) for one chat."""
+        chroma_count = 0
+        fts_count = 0
 
+        try:
+            existing = self.memory_turns.get(
+                where={"chat_id": chat_id},
+                include=[],
+            )
+            chroma_count = len(existing.get("ids") or [])
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] Chroma count check failed: {exc}"
+            )
+
+        try:
+            with sqlite3.connect(self.fts_path) as conn:
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM memory_turns_fts WHERE chat_id = ?",
+                    (chat_id,),
+                ).fetchone()
+                fts_count = int(row[0] or 0)
+        except Exception as exc:
+            print(
+                f"{Fore.YELLOW}"
+                f"[MEMORY INDEX] FTS count check failed: {exc}"
+            )
+
+        return chroma_count, fts_count
+
+    def _ensure_turn_index(self):
+        """
+        Reconcile the retrieval index against the canonical chat archive.
+        Partially indexed databases are repaired chat-by-chat.
+        """
+        try:
             existing = self.history.get(
                 include=["documents", "metadatas"],
             )
+
             ids = existing.get("ids") or []
             documents = existing.get("documents") or []
             metadatas = existing.get("metadatas") or []
@@ -324,31 +453,52 @@ class MemoryManager:
             if not ids:
                 return
 
-            print(
-                f"{Fore.CYAN}"
-                f"[MEMORY INDEX] migrating {len(ids)} legacy chats..."
-            )
+            repaired = 0
 
             for chat_id, document, metadata in zip(
                 ids,
                 documents,
                 metadatas,
             ):
-                self.sync_turn_index(
+                chat_id = str(chat_id)
+                expected_count = len(
+                    self._split_turns(document)
+                )
+
+                chroma_count, fts_count = (
+                    self._indexed_turn_counts(chat_id)
+                )
+
+                if (
+                    chroma_count == expected_count
+                    and fts_count == expected_count
+                ):
+                    continue
+
+                indexed = self.sync_turn_index(
                     chat_id,
                     document,
                     metadata or {},
                 )
 
-            print(
-                f"{Fore.GREEN}"
-                "[MEMORY INDEX] migration complete"
-            )
+                if indexed:
+                    repaired += 1
+
+            if repaired:
+                print(
+                    f"{Fore.GREEN}"
+                    f"[MEMORY INDEX] reconciled {repaired} chat(s)"
+                )
+            else:
+                print(
+                    f"{Fore.CYAN}"
+                    "[MEMORY INDEX] retrieval index already consistent"
+                )
 
         except Exception as exc:
             print(
                 f"{Fore.YELLOW}"
-                f"[MEMORY INDEX] migration failed: {exc}"
+                f"[MEMORY INDEX] reconciliation failed: {exc}"
             )
 
     @staticmethod
@@ -1254,11 +1404,12 @@ class MemoryManager:
         """
         Automatic long-term retrieval.
 
-        Routing is separated from retrieval quality:
-          1. RAGGate decides whether long-term memory is appropriate.
-          2. Hybrid turn-level retrieval maximizes recall.
-          3. Jina performs final precision reranking.
-          4. Only a small bounded context is returned to the main model.
+        Routing:
+          1. RAGGate decides whether retrieval is appropriate.
+          2. Hybrid turn retrieval maximizes recall.
+          3. Jina reranks for precision.
+          4. Hybrid candidates remain as a safe fallback if reranking
+             fails or is overly aggressive.
         """
         t0 = time.perf_counter()
 
@@ -1282,9 +1433,6 @@ class MemoryManager:
         if not basic.get("use_rag", False):
             return empty
 
-        # --------------------------------------------------------
-        # Stage 1: broad hybrid turn retrieval
-        # --------------------------------------------------------
         candidates = self._hybrid_candidates(
             query=query,
             vector_limit=max(30, k),
@@ -1294,6 +1442,7 @@ class MemoryManager:
         )
 
         t1 = time.perf_counter()
+
         print(
             f"[TIMING] hybrid retrieval {t1 - t0:.3f}s "
             f"({len(candidates)} candidates)"
@@ -1302,9 +1451,6 @@ class MemoryManager:
         if not candidates:
             return empty
 
-        # --------------------------------------------------------
-        # Stage 2: Jina precision reranking
-        # --------------------------------------------------------
         relevant_turns = []
 
         try:
@@ -1315,8 +1461,10 @@ class MemoryManager:
             candidates = candidates[:MAX_JINA_CANDIDATES]
 
             rerank_documents = []
+
             for index, candidate in enumerate(candidates):
                 text = candidate["text"]
+
                 if len(text) <= 7000:
                     excerpt = text
                 else:
@@ -1331,6 +1479,7 @@ class MemoryManager:
                 )
 
             reranker = self._get_reranker()
+
             results = reranker.rerank(
                 query,
                 rerank_documents,
@@ -1339,12 +1488,18 @@ class MemoryManager:
 
             if results:
                 top_score = float(
-                    results[0].get("relevance_score", 0.0)
+                    results[0].get(
+                        "relevance_score",
+                        0.0,
+                    )
                 )
 
                 for result in results:
                     score = float(
-                        result.get("relevance_score", 0.0)
+                        result.get(
+                            "relevance_score",
+                            0.0,
+                        )
                     )
 
                     if score < MIN_RELEVANCE:
@@ -1356,17 +1511,26 @@ class MemoryManager:
                     ):
                         break
 
-                    text = result.get("document", "")
+                    text = result.get(
+                        "document",
+                        "",
+                    )
+
                     try:
                         index = int(
                             text.split("\n", 1)[0]
                             .removeprefix("[CANDIDATE ")
                             .removesuffix("]")
                         )
+
                         relevant_turns.append(
                             candidates[index]["text"]
                         )
-                    except (ValueError, IndexError):
+
+                    except (
+                        ValueError,
+                        IndexError,
+                    ):
                         continue
 
                     if len(relevant_turns) >= top_n:
@@ -1375,10 +1539,26 @@ class MemoryManager:
         except Exception as exc:
             print(
                 f"{Fore.RED}"
-                f"Jina reranking failed: {type(exc).__name__}: {exc}"
+                f"Jina reranking failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+        # Reranking is a precision layer, not a hard database-existence
+        # gate. Preserve recall when Jina fails or rejects everything.
+        if not relevant_turns:
+            relevant_turns = [
+                candidate["text"]
+                for candidate in candidates[:top_n]
+            ]
+
+            print(
+                f"{Fore.YELLOW}"
+                "[RAG] Using hybrid candidates as reranker fallback "
+                f"({len(relevant_turns)} turns)"
             )
 
         t2 = time.perf_counter()
+
         print(
             f"[TIMING] reranking {t2 - t1:.3f}s "
             f"selected={len(relevant_turns)}"
@@ -1387,18 +1567,17 @@ class MemoryManager:
         if not relevant_turns:
             return empty
 
-        # --------------------------------------------------------
-        # Stage 3: final context budget
-        # --------------------------------------------------------
         selected = []
         current_chars = 0
 
         for turn in relevant_turns:
             remaining = max_chars - current_chars
+
             if remaining <= 0:
                 break
 
             clipped = turn[:remaining]
+
             selected.append(clipped)
             current_chars += len(clipped)
 
@@ -1409,41 +1588,115 @@ class MemoryManager:
             ),
         }
 
-    def get_memory_candidates(
+    def get_memory_candidates_detailed(
         self,
         query: str,
         conversation_limit: int = 5,
         turns_per_conversation: int = 6,
         exclude_chat_id: str | None = None,
-    ) -> list[str]:
+    ) -> list[dict]:
         """
         Candidate generation for explicit memory_call.
 
-        Hybrid retrieval provides broad recall. Observer does final
-        semantic selection, so Jina is intentionally not used here.
+        Returns retrieval records with source metadata so the caller can
+        identify which archived conversation/turn produced each match.
         """
         query = (query or "").strip()
+
         if not query:
             return []
 
         try:
             candidates = self._hybrid_candidates(
                 query=query,
-                vector_limit=max(20, conversation_limit * turns_per_conversation),
-                lexical_limit=max(20, conversation_limit * turns_per_conversation),
+                vector_limit=max(
+                    20,
+                    conversation_limit * turns_per_conversation,
+                ),
+                lexical_limit=max(
+                    20,
+                    conversation_limit * turns_per_conversation,
+                ),
                 fusion_limit=30,
                 exclude_chat_id=exclude_chat_id,
             )
 
-            texts = [
-                item["text"]
-                for item in candidates[:30]
+            if not candidates:
+                return []
+
+            ids = [
+                candidate["turn_id"]
+                for candidate in candidates
+                if candidate.get("turn_id")
             ]
 
+            metadata_by_id = {}
+
+            try:
+                indexed = self.memory_turns.get(
+                    ids=ids,
+                    include=["metadatas"],
+                )
+
+                for turn_id, metadata in zip(
+                    indexed.get("ids") or [],
+                    indexed.get("metadatas") or [],
+                ):
+                    metadata_by_id[turn_id] = metadata or {}
+
+            except Exception as exc:
+                print(
+                    f"{Fore.YELLOW}"
+                    f"[MEMORY TOOL] metadata lookup failed: {exc}"
+                )
+
+            detailed = []
+
+            for candidate in candidates[:30]:
+                metadata = dict(
+                    metadata_by_id.get(
+                        candidate.get("turn_id"),
+                        candidate.get("metadata") or {},
+                    )
+                )
+
+                detailed.append({
+                    "turn_id": candidate.get(
+                        "turn_id",
+                        "",
+                    ),
+                    "chat_id": str(
+                        metadata.get("chat_id")
+                        or candidate.get("chat_id")
+                        or ""
+                    ),
+                    "turn_index": metadata.get(
+                        "turn_index"
+                    ),
+                    "title": str(
+                        metadata.get("title") or ""
+                    ),
+                    "timestamp": str(
+                        metadata.get("timestamp") or ""
+                    ),
+                    "text": candidate.get(
+                        "text",
+                        "",
+                    ),
+                    "rrf": float(
+                        candidate.get(
+                            "rrf",
+                            0.0,
+                        )
+                    ),
+                })
+
             print(
-                f"[MEMORY TOOL] prepared {len(texts)} hybrid candidates"
+                f"[MEMORY TOOL] prepared "
+                f"{len(detailed)} hybrid candidates"
             )
-            return texts
+
+            return detailed
 
         except Exception as exc:
             print(
@@ -1453,7 +1706,27 @@ class MemoryManager:
             )
             return []
 
-    
+    def get_memory_candidates(
+        self,
+        query: str,
+        conversation_limit: int = 5,
+        turns_per_conversation: int = 6,
+        exclude_chat_id: str | None = None,
+    ) -> list[str]:
+        """
+        Backwards-compatible text-only candidate API.
+        """
+        return [
+            candidate["text"]
+            for candidate in self.get_memory_candidates_detailed(
+                query=query,
+                conversation_limit=conversation_limit,
+                turns_per_conversation=turns_per_conversation,
+                exclude_chat_id=exclude_chat_id,
+            )
+            if candidate.get("text")
+        ]
+
 
 
 memory_manager = MemoryManager()
