@@ -121,6 +121,7 @@ class Main:
     def form_short_term_memory(self):
         """Build the model-facing short-term context."""
         print(f"{Fore.CYAN}[DEBUG] Forming a memory injection for the model")
+
         sections = []
 
         if self.compacted_short_term_memory:
@@ -129,10 +130,22 @@ class Main:
                 f"{self.compacted_short_term_memory}"
             )
 
-        recent_turns = []
-        turns = extract_turns(self.short_term_memory)
+        # Normal case: use recent live turns.
+        if self.short_term_memory:
+            turns = extract_turns(self.short_term_memory)
+            processed_turns = turns[-MAX_LAST_TURNS:]
 
-        for entry in turns[-MAX_LAST_TURNS:]:
+        # After compaction: STM may be empty, so inject the
+        # latest raw archived turn directly.
+        elif self.saved_turns:
+            latest_index = max(self.saved_turns)
+            processed_turns = [self.saved_turns[latest_index]]
+
+        else:
+            processed_turns = []
+
+        recent_turns = []
+        for entry in processed_turns:
             turn = entry["turn"]
             print(f"Turn token length: {estimate_tokens(turn)}")
 
