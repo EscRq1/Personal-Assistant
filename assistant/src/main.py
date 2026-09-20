@@ -21,6 +21,7 @@ from colorama import Fore, init
 from assistant import Controller, ExecutionContext
 from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
 from tools.current_chat_search import set_current_chat, clear_current_chat
+from tools.estimate_tokens import estimate_tokens
 
 app = FastAPI()
 
@@ -133,10 +134,10 @@ class Main:
 
         for entry in turns[-MAX_LAST_TURNS:]:
             turn = entry["turn"]
-            print(f"Turn token length: {self.llm.tool_controller.estimate_tokens(turn)}")
+            print(f"Turn token length: {estimate_tokens(turn)}")
 
-            if self.llm.tool_controller.estimate_tokens(turn) > MAX_TURN_TOKENS:
-                print(f"Turn token cap exceeded: {self.llm.tool_controller.estimate_tokens(turn)}")
+            if estimate_tokens(turn) > MAX_TURN_TOKENS:
+                print(f"Turn token cap exceeded: {estimate_tokens(turn)}")
                 continue
 
             for item in turn:
@@ -214,7 +215,6 @@ class Main:
                 return
 
             blocks = self.pending_compaction_blocks
-            self.pending_compaction_blocks = []
 
             rolled_lines = []
 
@@ -235,23 +235,63 @@ class Main:
             if previous_summary:
                 prompt = (
                     "Update the compacted memory for a personal assistant.\n\n"
+
                     "Preserve information that may be necessary to continue the conversation accurately, especially:\n"
-                    "- user goals and decisions\n- technical facts and project state\n- unresolved problems\n"
-                    "- important constraints\n- important files, names, versions, identifiers, and configuration\n"
-                    "- conclusions already reached\n- important context needed for future follow-ups\n\n"
-                    "Do not invent information. Do not include conversational filler. Write a compact factual summary.\n\n"
-                    f"EXISTING COMPACTED MEMORY:\n{previous_summary}\n\nNEW ROLLED-OVER TURNS:\n{transcript}"
+                    "- user goals and decisions\n"
+                    "- technical facts and project state\n"
+                    "- unresolved problems\n"
+                    "- important constraints\n"
+                    "- important files, names, versions, identifiers, and configuration\n"
+                    "- conclusions already reached\n"
+                    "- important context needed for future follow-ups\n\n"
+
+                    "PRIORITY RULE FOR THE MOST RECENT TURN:\n"
+                    "The final turn in the provided rolled-over turns represents the latest "
+                    "state of the conversation and should receive extra attention.\n"
+                    "Preserve the latest user's intent, the latest assistant conclusion, "
+                    "any unresolved question or task, and any information required to "
+                    "continue that discussion coherently.\n"
+                    "When deciding what can be omitted, prefer preserving the context of "
+                    "the most recent turn over repetitive or already-established older details.\n"
+                    "Do not summarize the final turn so aggressively that its connection to "
+                    "the preceding discussion is lost.\n\n"
+
+                    "Do not invent information. Do not include conversational filler. "
+                    "Write a compact factual summary.\n\n"
+
+                    f"EXISTING COMPACTED MEMORY:\n{previous_summary}\n\n"
+                    f"NEW ROLLED-OVER TURNS:\n{transcript}"
                 )
-            else:
-                prompt = (
-                    "Summarize the previous conversation for a personal assistant.\n\n"
-                    "Preserve information that may be necessary to continue the conversation accurately, especially:\n"
-                    "- user goals and decisions\n- technical facts and project state\n- unresolved problems\n"
-                    "- important constraints\n- important files, names, versions, identifiers, and configuration\n"
-                    "- conclusions already reached\n- important context needed for future follow-ups\n\n"
-                    "Do not invent information. Do not include conversational filler. Write a compact factual summary.\n\n"
-                    f"ROLLED-OVER TURNS:\n{transcript}"
-                )
+
+        else:
+            prompt = (
+                "Summarize the previous conversation for a personal assistant.\n\n"
+
+                "Preserve information that may be necessary to continue the conversation accurately, especially:\n"
+                "- user goals and decisions\n"
+                "- technical facts and project state\n"
+                "- unresolved problems\n"
+                "- important constraints\n"
+                "- important files, names, versions, identifiers, and configuration\n"
+                "- conclusions already reached\n"
+                "- important context needed for future follow-ups\n\n"
+
+                "PRIORITY RULE FOR THE MOST RECENT TURN:\n"
+                "The final turn in the provided rolled-over turns represents the latest "
+                "state of the conversation and should receive extra attention.\n"
+                "Preserve the latest user's intent, the latest assistant conclusion, "
+                "any unresolved question or task, and any information required to "
+                "continue that discussion coherently.\n"
+                "When deciding what can be omitted, prefer preserving the context of "
+                "the most recent turn over repetitive or already-established older details.\n"
+                "Do not summarize the final turn so aggressively that its connection to "
+                "the preceding discussion is lost.\n\n"
+
+                "Do not invent information. Do not include conversational filler. "
+                "Write a compact factual summary.\n\n"
+
+                f"ROLLED-OVER TURNS:\n{transcript}"
+            )
 
             parts = []
 
@@ -285,11 +325,12 @@ class Main:
 
             if chat_state_generation != self.chat_state_generation or ctx.cancel_event.is_set():
                 return
-
+            
+            self.pending_compaction_blocks = []
             self.compacted_short_term_memory = summary
             self.compaction_generation += 1
 
-            print(f"[MEMORY] Short-term memory compacted (generation={self.compaction_generation}, summary_tokens={self.llm.tool_controller.estimate_tokens(summary)})")
+            print(f"[MEMORY] Short-term memory compacted (generation={self.compaction_generation}, summary_tokens={estimate_tokens(summary)})")
 
     def schedule_memory_compaction(self, rolled_over_memory):
         """Queue a raw block for background Observer compaction."""
@@ -338,7 +379,7 @@ class Main:
     def memory_overflow_observer(self):
         """Roll over raw memory when the live block exceeds the hard limit."""
 
-        token_count = self.llm.tool_controller.estimate_tokens(
+        token_count = estimate_tokens(
             self.short_term_memory
         )
 
@@ -361,29 +402,39 @@ class Main:
         task = self.compaction_task
         ctx = self.compaction_context
 
-        self.compaction_task = None
-        self.compaction_context = None
-
-        self.pending_compaction_blocks.clear()
-
         if ctx is not None:
             ctx.cancel_event.set()
 
-        if task is None or task.done():
-            return
-
-        try:
-            await asyncio.wait_for(task, timeout=5.0)
-        except asyncio.TimeoutError:
-            task.cancel()
+        # Wait until the Observer has actually stopped.
+        if task is not None and not task.done():
             try:
-                await task
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
             except asyncio.CancelledError:
                 pass
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            print(f"[MEMORY] Background compaction stop failed: {type(exc).__name__}: {exc}")
+            except Exception as exc:
+                print(
+                    f"[MEMORY] Background compaction stop failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+
+        # Any blocks still pending were never successfully committed
+        # into compacted_short_term_memory, so move them back from the
+        # archived store into short-term memory.
+        for block in self.pending_compaction_blocks:
+            for entry in block:
+                self.saved_turns.pop(entry["index"], None)
+                self.short_term_memory.append(entry)
+
+        self.pending_compaction_blocks.clear()
+
+        self.compaction_task = None
+        self.compaction_context = None
 
     def _memory_compaction_done(self, task):
         try:
@@ -630,7 +681,7 @@ class Main:
     # ============================================================
 
     def seed_from_chat_document(self, document: str):
-        """Restore a canonical JSON chat document into live short-term memory."""
+        """Restore the complete canonical JSON chat document into short-term memory."""
 
         self.reset_chat_state()
 
@@ -651,32 +702,24 @@ class Main:
         turns = extract_turns(raw_messages)
         turns.sort(key=lambda entry: entry["index"])
 
+        # Restore the entire canonical transcript into one raw-memory container.
+        self.short_term_memory = turns
+        self.saved_turns.clear()
+
         self.current_turn = max(
             (entry["index"] for entry in turns),
             default=0,
         )
 
-        split_index = max(0, len(turns) - MAX_LAST_TURNS)
-        archived_turns = turns[:split_index]
-        live_turns = turns[split_index:]
-
-        if archived_turns:
-            self.saved_turns = {
-                entry["index"]: entry
-                for entry in archived_turns
-            }
-
-        self.short_term_memory = live_turns
-
         self._refresh_current_chat_index()
 
         self.chat_initialized = True
 
-        self.short_term_generation = len(live_turns)
+        self.short_term_generation = len(turns)
 
         print(
-            f"[Chat restore] Restored {len(live_turns)} live turn(s) "
-            f"and archived {len(archived_turns)} older turn(s)."
+            f"[Chat restore] Restored {len(turns)} turn(s) "
+            "into short-term memory."
         )
 
         return True
@@ -762,7 +805,7 @@ class Main:
         # 2. Retrieve context
         # --------------------------------------------------------
 
-        if self.llm.tool_controller.estimate_tokens(user_input) <= 2000:
+        if estimate_tokens(user_input) <= 2000:
             context_data = self.memory.get_raw_context(
                 user_input,
                 k=20,
@@ -1989,6 +2032,30 @@ def summary():
         status_code=200,
     )
 
+@app.get("/debug/memory")
+def debug_memory():
+    return {
+        "short_term_count": len(assistant.short_term_memory),
+        "short_term_memory": assistant.short_term_memory,
+
+        "saved_turns_count": len(assistant.saved_turns),
+        "saved_turns": list(assistant.saved_turns.values()),
+
+        "pending_compaction_blocks_count": len(
+            assistant.pending_compaction_blocks
+        ),
+        "pending_compaction_blocks": assistant.pending_compaction_blocks,
+
+        "compacted_short_term_memory": (
+            assistant.compacted_short_term_memory
+        ),
+
+        "compaction_generation": assistant.compaction_generation,
+        "short_term_generation": assistant.short_term_generation,
+        "chat_state_generation": assistant.chat_state_generation,
+        "current_chat_id": assistant.current_chat_id,
+        "chat_initialized": assistant.chat_initialized,
+    }
 
 if __name__ == "__main__":
     import uvicorn
@@ -1998,3 +2065,4 @@ if __name__ == "__main__":
         host="127.0.0.1",
         port=5000,
     )
+
