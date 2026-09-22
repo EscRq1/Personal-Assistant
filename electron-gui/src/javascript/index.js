@@ -81,7 +81,7 @@ async function saveCurrentChat(option) {
             }
 
             const saveJson = await saveRes.json();
-            if (saveJson.id) currentChatId = saveJson.id;
+            if (saveJson.chat_id) currentChatId = saveJson.chat_id;
 
             const pruneRes = await fetch(`${API}/prune`, { method: "POST" });
             if (!pruneRes.ok) console.warn(`Prune request failed: ${pruneRes.status}`);

@@ -1466,9 +1466,58 @@ async def ask(request: Request):
         },
     )
 
+def get_current_chat_turns():
+    """Return the complete canonical in-memory transcript."""
+    turns = list(assistant.saved_turns.values())
+    turns.extend(assistant.short_term_memory)
+    turns = extract_turns(turns)
+    turns.sort(key=lambda entry: entry["index"])
+    return turns
+
+
+def build_summary_transcript(turns):
+    """Build the compact transcript used only for final chat summarization."""
+    summary_turns = turns[-MAX_LAST_TURNS:]
+    summary_messages = []
+
+    for turn in summary_turns:
+        for message in turn["turn"]:
+            if not isinstance(message, dict):
+                continue
+
+            role = message.get("role")
+            content = message.get("content", "")
+
+            if (
+                role in {"user", "assistant"}
+                and isinstance(content, str)
+            ):
+                summary_messages.append(
+                    f"{role.title()}: {content}"
+                )
+
+    return "\n".join(summary_messages)
+
+
+def serialize_turns(turns):
+    """Serialize canonical turns into the stored chat document."""
+    content_to_save = [
+        {
+            "index": turn["index"],
+            "turn": turn["turn"],
+        }
+        for turn in turns
+    ]
+
+    return json.dumps(
+        content_to_save,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
 def persist_session(chat_id=None):
-    """Persist saved_turns + current short-term memory as one canonical chat."""
-    
+    """Persist the current runtime transcript without finalizing the session."""
+
     with assistant.finalize_lock:
         if (
             chat_id
@@ -1480,10 +1529,7 @@ def persist_session(chat_id=None):
                 "message": "Requested chat_id does not match the active chat.",
             }, 409
 
-        turns = list(assistant.saved_turns.values())
-        turns.extend(assistant.short_term_memory)
-        turns = extract_turns(turns)
-        turns.sort(key=lambda entry: entry["index"])
+        turns = get_current_chat_turns()
 
         messages_to_save = []
 
@@ -1510,40 +1556,7 @@ def persist_session(chat_id=None):
                 "message": "No memory to save",
             }, 200
 
-        content_to_save = [
-            {
-                "index": turn["index"],
-                "turn": turn["turn"],
-            }
-            for turn in turns
-        ]
-
-        full_transcript = json.dumps(
-            content_to_save,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-
-        summary_turns = turns[-MAX_LAST_TURNS:]
-        summary_messages = []
-
-        for turn in summary_turns:
-            for message in turn["turn"]:
-                if not isinstance(message, dict):
-                    continue
-
-                role = message.get("role")
-                content = message.get("content", "")
-
-                if (
-                    role in {"user", "assistant"}
-                    and isinstance(content, str)
-                ):
-                    summary_messages.append(
-                        f"{role.title()}: {content}"
-                    )
-
-        summary_transcript = "\n".join(summary_messages)
+        full_transcript = serialize_turns(turns)
 
         effective_chat_id = (
             chat_id
@@ -1561,28 +1574,28 @@ def persist_session(chat_id=None):
                 )
 
                 if existing.get("ids") and existing.get("metadatas"):
-                    existing_meta = dict(existing["metadatas"][0] or {})
+                    existing_meta = dict(
+                        existing["metadatas"][0] or {}
+                    )
                 else:
                     effective_chat_id = None
 
             except Exception as e:
                 print(
-                    "[Finalize]: Could not load existing metadata: "
+                    "[Persist]: Could not load existing metadata: "
                     f"{e}"
                 )
                 effective_chat_id = None
-
-        generated = assistant.make_chat_summary(summary_transcript)
-
-        if not isinstance(generated, dict):
-            generated = {}
 
         now = datetime.now().isoformat(timespec="microseconds")
 
         compacted_data = assistant.compacted_short_term_memory
 
         if not compacted_data:
-            compacted_data = existing_meta.get("compacted_data", "")
+            compacted_data = existing_meta.get(
+                "compacted_data",
+                "",
+            )
 
         if isinstance(compacted_data, list):
             compacted_data = "".join(compacted_data)
@@ -1591,14 +1604,13 @@ def persist_session(chat_id=None):
             compacted_data = str(compacted_data)
 
         metadata = {
+            # Preserve the existing summary during a normal save.
             "title": str(
-                generated.get("title")
-                or existing_meta.get("title")
+                existing_meta.get("title")
                 or "Chat"
             ),
             "snippet": str(
-                generated.get("snippet")
-                or existing_meta.get("snippet")
+                existing_meta.get("snippet")
                 or "No summary available"
             ),
             "pinned": normalize_pin_value(
@@ -1614,6 +1626,8 @@ def persist_session(chat_id=None):
             "compacted_data": compacted_data,
         }
 
+        # Keep the currently displayed summary synchronized with
+        # whatever metadata is already stored.
         assistant.summary = {
             "title": metadata["title"],
             "snippet": metadata["snippet"],
@@ -1625,7 +1639,10 @@ def persist_session(chat_id=None):
                 text=full_transcript,
                 metadata=metadata,
             ):
-                return {"status": "error", "message": "Failed to update stored chat"}, 500
+                return {
+                    "status": "error",
+                    "message": "Failed to update stored chat",
+                }, 500
 
             saved_id = effective_chat_id
 
@@ -1635,10 +1652,7 @@ def persist_session(chat_id=None):
                 metadata,
             )
 
-        session_user_text = "\n\n".join(
-            assistant.pending_profile_inputs
-        ).strip()
-
+        assistant.current_chat_id = saved_id
 
         return {
             "status": "success",
@@ -1650,10 +1664,88 @@ def persist_session(chat_id=None):
         # async /save and /shutdown handlers before entering this sync method.
 
 def finalize_session(chat_id=None):
+    """Persist, generate final metadata, update profile, then reset."""
+
     payload, status_code = persist_session(chat_id)
 
     if status_code != 200:
         return payload, status_code
+
+    if payload.get("status") == "ignored":
+        assistant.reset_chat_state()
+        return payload, status_code
+
+    saved_id = payload["chat_id"]
+
+    turns = get_current_chat_turns()
+    summary_transcript = build_summary_transcript(turns)
+
+    generated = assistant.make_chat_summary(summary_transcript)
+
+    if not isinstance(generated, dict):
+        generated = {}
+
+    try:
+        existing = assistant.memory.history.get(
+            ids=[saved_id],
+            include=["metadatas"],
+        )
+
+        existing_meta = dict(
+            existing["metadatas"][0] or {}
+        ) if (
+            existing.get("ids")
+            and existing.get("metadatas")
+        ) else {}
+
+    except Exception as e:
+        print(
+            "[Finalize]: Could not reload saved metadata: "
+            f"{e}"
+        )
+        existing_meta = {}
+
+    now = datetime.now().isoformat(timespec="microseconds")
+
+    metadata = dict(existing_meta)
+
+    metadata["title"] = str(
+        generated.get("title")
+        or metadata.get("title")
+        or "Chat"
+    )
+
+    metadata["snippet"] = str(
+        generated.get("snippet")
+        or metadata.get("snippet")
+        or "No summary available"
+    )
+
+    metadata["pinned"] = normalize_pin_value(
+        metadata.get("pinned", 0)
+    )
+
+    metadata["created_at"] = str(
+        metadata.get("created_at")
+        or metadata.get("timestamp")
+        or now
+    )
+
+    metadata["updated_at"] = now
+    metadata["timestamp"] = now
+
+    assistant.summary = {
+        "title": metadata["title"],
+        "snippet": metadata["snippet"],
+    }
+
+    # Only metadata needs to change here.
+    # The transcript was already persisted by persist_session().
+    assistant.memory.update_history(
+        chat_id=saved_id,
+        text=serialize_turns(turns),
+        metadata=metadata,
+    )
 
     session_user_text = "\n\n".join(
         assistant.pending_profile_inputs
