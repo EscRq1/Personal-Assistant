@@ -507,27 +507,24 @@ input:checked + .slider:before {
 .sidebar {
     grid-area: sidebar;
     display: grid;
-    grid-template-rows: 50px 1fr;
+    grid-template-rows: 50px 1fr 40px;
     grid-template-columns: 1fr 30px;
-    grid-template-areas: "col-btn new-btn"
-                         "chats chats";
-    position: sticky;
-
-
-    
-    background-color: #ecf0f1b7; 
-    justify-content: flex-start; 
+    grid-template-areas:
+        "col-btn new-btn"
+        "chats chats"
+        "save-btn save-btn";
+    background-color: #ecf0f1b7;
+    justify-content: flex-start;
     align-items: flex-start;
     padding: 15px;
-
-    overflow: visible;
-    overflow-y: scroll;
     overflow-x: hidden;
-    
+    overflow-y: auto;   /* auto, not scroll — only show scrollbar when needed */
 }
 
 
-.col-btn, .new-btn{
+
+
+.col-btn, .new-btn, .save-btn{
     border: 0;
     padding: 0;
     width: 40px;
@@ -554,6 +551,10 @@ input:checked + .slider:before {
     
 }
 
+.save-btn {
+    grid-area: save-btn;
+    display: flex;
+}
 
 
 .new-btn::after{
@@ -579,6 +580,33 @@ input:checked + .slider:before {
 }
 
 .new-btn:hover::after {
+    display: block;
+}
+
+.save-btn::after{
+    background-color: rgb(0, 0, 0);
+    color: rgb(255, 255, 255);
+    font-size: 13px;
+    content: "Save current chat";
+    position: fixed;
+    padding: 0 5px 0 5px;
+    display: none;
+    
+
+    margin-top: 10px; 
+
+    left: 4%;
+    transform: translateX(-4%); 
+
+    
+
+    white-space: nowrap; 
+    background: black;
+    color: white;
+    padding: 4px 8px;
+}
+
+.save-btn:hover::after {
     display: block;
 }
 

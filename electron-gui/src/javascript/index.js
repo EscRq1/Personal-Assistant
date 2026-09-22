@@ -1,5 +1,6 @@
 const container = document.getElementById("gc");
 const newBtn = document.querySelector(".new-btn");
+const saveBtn = document.getElementById("save-btn")
 const chatList = document.querySelector(".sb-container");
 const renameBtn = document.getElementById("rename-btn");
 const pinBtn = document.getElementById("pin-btn");
@@ -55,7 +56,7 @@ function setBusy(busy) {
     document.body.style.cursor = busy ? "progress" : "default";
 }
 
-async function saveCurrentChat() {
+async function saveCurrentChat(option) {
     if (saveInFlight) return saveInFlight;
     if (isGenerating || isStopping) {
         console.warn("Save requested while generation is active.");
@@ -69,9 +70,15 @@ async function saveCurrentChat() {
             const form = new FormData();
             if (snapshotChatId) form.append("chat_id", snapshotChatId);
 
-            const saveRes = await fetch(`${API}/save`, { method: "POST", body: form });
-            if (!saveRes.ok) throw new Error(`Save request failed: ${saveRes.status}`);
-
+            let saveRes;
+            if(option == 0){
+                saveRes = await fetch(`${API}/save`, { method: "POST", body: form });
+                if (!saveRes.ok) throw new Error(`Save request failed: ${saveRes.status}`);
+            } else {
+                saveRes = await fetch(`${API}/finilize`, { method: "POST", body: form });
+                if (!saveRes.ok) throw new Error(`Save request failed: ${saveRes.status}`);
+            }
+            
             const saveJson = await saveRes.json();
             if (saveJson.id) currentChatId = saveJson.id;
 
@@ -287,7 +294,7 @@ async function loadChat(chatId) {
             if (isBusy()) return;
 
             if (!isHistory && !isEmpty()) {
-                const saved = await saveCurrentChat();
+                const saved = await saveCurrentChat(1);
                 if (saved === null && isBusy()) return;
             }
             if (loadId !== chatLoadGeneration) return;
@@ -331,7 +338,7 @@ function resetChat() {
 
 newBtn.addEventListener("click", async () => {
     if (isBusy()) return;
-    if (!isHistory && !isEmpty()) await saveCurrentChat();
+    if (!isHistory && !isEmpty()) await saveCurrentChat(1);
     resetChat();
 });
 
@@ -831,18 +838,8 @@ document.addEventListener("keydown", event => {
     setMenu(false);
 });
 
-/* ---- select handlers: react to change, NEVER close the menu ---- */
-const headerMenuSelectHandlers = {
-    "hm-assist-1": value => { /* TODO: assistant primary model */ },
-    "hm-assist-2": value => { /* TODO: assistant secondary option */ },
-    "hm-coder-1":  value => { /* TODO: coder model */ },
-    "hm-coder-2":  value => { /* TODO: coder option */ }
-};
+saveBtn.addEventListener("click", async () => {
+    await saveCurrentChat(0);
+    print("Chat saved.")
+})
 
-for (const [id, onChange] of Object.entries(headerMenuSelectHandlers)) {
-    const el = document.getElementById(id);
-    if (!el) continue;
-    // Defensive: keeps future bubble-phase document handlers from hijacking select clicks.
-    el.addEventListener("click", e => e.stopPropagation());
-    el.addEventListener("change", () => onChange(el.value));
-}
