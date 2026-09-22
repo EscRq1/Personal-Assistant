@@ -1,6 +1,6 @@
 const container = document.getElementById("gc");
 const newBtn = document.querySelector(".new-btn");
-const saveBtn = document.getElementById("save-btn")
+const saveBtn = document.getElementById("save-btn");
 const chatList = document.querySelector(".sb-container");
 const renameBtn = document.getElementById("rename-btn");
 const pinBtn = document.getElementById("pin-btn");
@@ -23,6 +23,8 @@ const modeSelectorCoder = document.getElementById("hm-coder-1");
 const budgetSelectorAssistant = document.getElementById("hm-assist-2");
 const budgetSelectorCoder = document.getElementById("hm-coder-2");
 
+/* ------------------------------------------------------------------- state */
+
 let currentAbortController = null;
 let currentGenerationId = 0;
 let stoppedGenerationId = 0;
@@ -40,39 +42,67 @@ let isSaving = false;
 let isSearching = false;
 let pendingImages = [];
 let menuOpen = false;
+let stickToBottom = true;
+
+/* Turn mini-map state */
+let turnMapEl = null;
+let turnMapBarsEl = null;
+let turnMapListEl = null;
+let turnBars = [];
+let turnObserver = null;
+let visibleTurns = new Map();
+let turnScrollRoot = document.querySelector(".content") || outputDiv;
+let turnMapMO = null;
+let turnMapBuildFrame = null;
+let turnMapScrollFrame = null;
+let activeTurnIndex = -1;
+let turnIdCounter = 0;
 
 const isEmpty = () => outputDiv.children.length === 0;
+
 const API = "http://localhost:5000";
-const isBusy = () => isSaving || isGenerating || isStopping || navigationInFlight !== null;
+
+/* ignoreNavigation: for use INSIDE loadChat, where navigationInFlight is
+   deliberately set by us and must not count as "busy". */
+const isBusy = (ignoreNavigation = false) =>
+    isSaving || isGenerating || isStopping ||
+    (!ignoreNavigation && navigationInFlight !== null);
 
 function setBusy(busy) {
     isSaving = busy;
     newBtn.style.pointerEvents = busy ? "none" : "auto";
     chatList.style.pointerEvents = busy ? "none" : "auto";
+
     if (busy) {
         ain.disabled = imgBtn.disabled = toggleInput.disabled = true;
     } else if (!isGenerating && !isStopping) {
         ain.disabled = imgBtn.disabled = toggleInput.disabled = false;
     }
+
     document.body.style.cursor = busy ? "progress" : "default";
 }
 
+/* ------------------------------------------------------------------- saving */
+
 async function saveCurrentChat(option) {
     if (saveInFlight) return saveInFlight;
+
     if (isGenerating || isStopping) {
         console.warn("Save requested while generation is active.");
         return null;
     }
 
     const snapshotChatId = currentChatId;
+
     saveInFlight = (async () => {
         setBusy(true);
+
         try {
             const form = new FormData();
             if (snapshotChatId) form.append("chat_id", snapshotChatId);
 
             let saveRes;
-            if(option == 0){
+            if (option == 0) {
                 saveRes = await fetch(`${API}/save`, { method: "POST", body: form });
                 if (!saveRes.ok) throw new Error(`Save request failed: ${saveRes.status}`);
             } else {
@@ -96,8 +126,11 @@ async function saveCurrentChat(option) {
             saveInFlight = null;
         }
     })();
+
     return saveInFlight;
 }
+
+/* ----------------------------------------------------------------- sidebar */
 
 function isPinned(value) {
     return value === true || value === 1 || value === "1" ||
@@ -108,17 +141,20 @@ async function loadSidebarHistory() {
     try {
         const response = await fetch(`${API}/history`);
         const payload = await response.json().catch(() => null);
+
         if (!response.ok) {
             throw new Error(payload?.message || `History request failed: ${response.status}`);
         }
 
         const history = Array.isArray(payload) ? payload :
             Array.isArray(payload?.history) ? payload.history : [];
+
         const fragment = document.createDocumentFragment();
 
         for (const item of history) {
             const id = String(item.id ?? "");
             const pinned = isPinned(item.pinned);
+
             const div = document.createElement("div");
             div.dataset.chatId = id;
             div.dataset.pinned = pinned ? "1" : "0";
@@ -130,40 +166,50 @@ async function loadSidebarHistory() {
                 pin.textContent = "📌";
                 title.appendChild(pin);
             }
+
             title.appendChild(document.createTextNode(String(item.title || "Legacy Chat")));
 
             const menuButton = document.createElement("button");
             menuButton.className = "menu-btn";
             menuButton.dataset.id = id;
             menuButton.setAttribute("aria-label", "Chat menu");
+
             const icon = document.createElement("img");
             icon.src = "../../assets/ellipsis-vertical-solid-full.svg";
             icon.alt = "";
-            menuButton.appendChild(icon);
 
+            menuButton.appendChild(icon);
             div.append(title, menuButton);
+
             div.addEventListener("click", async event => {
                 if (event.target.closest(".menu-btn") || isBusy()) return;
+
                 header.innerText = item.title || "Legacy Chat";
                 header.style.setProperty(
                     "--snippet",
                     JSON.stringify(item.snippet || "No summary available")
                 );
+
                 await loadChat(id);
             });
+
             fragment.appendChild(div);
         }
+
         chatList.replaceChildren(fragment);
     } catch (error) {
         console.error("History load failed:", error);
     }
 }
+
 loadSidebarHistory();
 
 chatList.addEventListener("click", e => {
     const menuButton = e.target.closest(".menu-btn");
     if (!menuButton) return;
+
     e.stopPropagation();
+
     const rect = menuButton.getBoundingClientRect();
     menu.style.left = rect.right + "px";
     menu.style.top = rect.top + "px";
@@ -177,6 +223,8 @@ document.addEventListener("click", event => {
         menu.dataset.id = "";
     }
 });
+
+/* ------------------------------------------------------------- chat actions */
 
 function askRename() {
     return new Promise(resolve => {
@@ -213,6 +261,7 @@ function askRename() {
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+
         const input = modal.querySelector("#rename-input");
         input.focus();
         input.select();
@@ -221,6 +270,7 @@ function askRename() {
             overlay.remove();
             resolve(value);
         };
+
         modal.addEventListener("click", e => e.stopPropagation());
         overlay.addEventListener("click", () => close(null));
 
@@ -228,8 +278,10 @@ function askRename() {
             const value = input.value.trim();
             if (value) close(value);
         };
+
         modal.querySelector("#rename-ok").onclick = submit;
         modal.querySelector("#rename-cancel").onclick = () => close(null);
+
         input.addEventListener("keydown", e => {
             if (e.key === "Enter") submit();
             else if (e.key === "Escape") close(null);
@@ -251,26 +303,34 @@ async function chatMenu(type) {
         if (type === 1) {
             const newName = await askRename();
             if (!newName) return;
+
             const form = new FormData();
             form.append("id", id);
             form.append("title", newName);
+
             const response = await fetch(`${API}/rename`, { method: "POST", body: form });
             if (!response.ok) throw new Error(`Rename request failed: ${response.status}`);
+
             await loadSidebarHistory();
         } else if (type === 2) {
             const form = new FormData();
             form.append("id", id);
             pinBtn.disabled = true;
+
             const response = await fetch(`${API}/pin`, { method: "POST", body: form });
             const result = await response.json().catch(() => ({}));
+
             if (!response.ok) throw new Error(result.message || `Pin request failed: ${response.status}`);
+
             await loadSidebarHistory();
             pinBtn.disabled = false;
         } else if (type === 3) {
             const form = new FormData();
             form.append("id", id);
+
             const response = await fetch(`${API}/delete`, { method: "POST", body: form });
             if (!response.ok) throw new Error(`Delete request failed: ${response.status}`);
+
             await loadSidebarHistory();
             if (id === currentChatId) resetChat();
         } else {
@@ -284,23 +344,27 @@ async function chatMenu(type) {
     }
 }
 
+/* -------------------------------------------------------------- navigation */
+
 async function loadChat(chatId) {
     if (isBusy()) return;
+
     const requestedChatId = String(chatId);
     const loadId = ++chatLoadGeneration;
 
-    navigationInFlight = (async () => {
+    // Hold our own promise so the finally can verify ownership before clearing.
+    const navTask = (async () => {
         try {
             if (saveInFlight) await saveInFlight;
-            if (isBusy()) return;
+            if (isBusy(true)) return;              // was isBusy() — saw our own flag
 
             if (!isHistory && !isEmpty()) {
                 try {
                     const saved = await saveCurrentChat(1);
-                    if (saved === null && isBusy()) return;
+                    if (saved === null && isBusy(true)) return;
                 } catch (err) {
                     console.error("Auto-save before navigation failed:", err);
-                    // decide: proceed anyway or abort navigation. Proceeding below.
+                    // proceed with navigation anyway
                 }
             }
 
@@ -308,47 +372,71 @@ async function loadChat(chatId) {
 
             const response = await fetch(`${API}/chat/${encodeURIComponent(requestedChatId)}`);
             if (!response.ok) throw new Error(`Chat request failed: ${response.status}`);
+
             const data = await response.json();
             if (!data || !Array.isArray(data.messages)) throw new Error("Invalid chat messages received");
+
             if (loadId !== chatLoadGeneration) return;
 
             currentChatId = requestedChatId;
             isHistory = true;
+            stickToBottom = true;
             outputDiv.replaceChildren();
+
             for (const message of data.messages) {
                 if (!message || !["user", "assistant"].includes(message.role) ||
                     typeof message.content !== "string") continue;
+
                 appendStoredMessage(outputDiv, message.role, message.content, false);
             }
-            outputDiv.scrollTop = outputDiv.scrollHeight;
+
+            if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+
+            // The stored chat has now been fully materialized. Build the turn
+            // map immediately instead of relying only on MutationObserver/rAF.
+            refreshTurnMapNow();
+
         } catch (err) {
             console.error("Chat load failed:", err);
         }
     })();
 
+    navigationInFlight = navTask;
+
     try {
-        await navigationInFlight;
+        await navTask;
+        refreshTurnMap();
     } finally {
-        if (loadId === chatLoadGeneration) navigationInFlight = null;
+        // Identity check, not generation check: resetChat()/a newer load may have
+        // bumped chatLoadGeneration while we awaited. Clearing on generation left
+        // the flag permanently set after delete/new-chat -> frozen sidebar.
+        if (navigationInFlight === navTask) navigationInFlight = null;
     }
 }
 
 function resetChat() {
     ++chatLoadGeneration;
+    navigationInFlight = null;          // explicit release — prevents permanent freeze
     outputDiv.replaceChildren();
+    stickToBottom = true;
     clearInputUI();
+
     header.innerText = "New Chat";
     header.style.setProperty("--snippet", '"Ask something to start a new chat"');
+
     isHistory = false;
     currentChatId = null;
+    refreshTurnMapNow();
 }
 
 newBtn.addEventListener("click", async () => {
     if (isBusy()) return;
+
     if (!isHistory && !isEmpty()) {
         try { await saveCurrentChat(1); }
         catch (err) { console.error("Auto-save before new chat failed:", err); }
     }
+
     resetChat();
 });
 
@@ -369,7 +457,10 @@ function resizeInput() {
     ain.style.height = Math.min(ain.scrollHeight, maxHeight) + "px";
     ain.style.overflowY = ain.scrollHeight > maxHeight ? "auto" : "hidden";
 }
+
 ain.addEventListener("input", resizeInput);
+
+/* --------------------------------------------------------------- rendering */
 
 function updateMessage(element, role, content) {
     if (role === "assistant") {
@@ -393,11 +484,12 @@ function appendMessage(output, role, content = "", shouldScroll = true) {
 
     const text = document.createElement("div");
     text.className = "text";
+
     message.append(meta, text);
     output.appendChild(message);
     updateMessage(text, role, content);
 
-    if (shouldScroll) output.scrollTop = output.scrollHeight;
+    if (shouldScroll && stickToBottom) output.scrollTop = output.scrollHeight;
     return text;
 }
 
@@ -408,14 +500,28 @@ function createMissingImageLabel(imageName) {
     return fallback;
 }
 
+/* Stored user messages embed image references inline. Accepted shapes
+   (case-insensitive): "[image: name]", "[image=name]", "[img: name]",
+   "[pic name]", or a bare bracketed filename "[shot.png]".
+
+   NOTE: confirm against whatever main.py actually writes into img_tags —
+   the previous pattern (/\\\r\n]+)\\]\sg) had an unmatched ")" and made the
+   whole script fail to parse. */
+
+const STORED_IMAGE_TAG_RE =
+    /!?\[(?:(?:image\vert{}img\vert{}pic\vert{}photo)\s*[:=]?\s*([^\]\r\n]+?)|([^\]\r\n]+\.(?:png|jpe?g|webp|gif|bmp)))\s*\]/gi;
+
 function appendStoredMessage(output, role, content = "", shouldScroll = true) {
     if (role !== "user") return appendMessage(output, role, content, shouldScroll);
 
     const imageNames = [];
+
     const remainingText = String(content).replace(
-        /\[IMAGE:\s*([^\]\r\n]+)\]\s*/g,
-        (_, imageName) => {
-            imageNames.push(imageName.trim());
+        STORED_IMAGE_TAG_RE,
+        (match, namedName, fileOnlyName) => {
+            const imageName = (namedName || fileOnlyName || "").trim();
+            if (!imageName) return match;
+            imageNames.push(imageName);
             return "";
         }
     );
@@ -424,11 +530,14 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
 
     const message = document.createElement("div");
     message.className = "msg user";
+
     const meta = document.createElement("div");
     meta.className = "meta";
     meta.textContent = "You";
+
     const text = document.createElement("div");
     text.className = "text";
+
     const imageList = document.createElement("div");
     imageList.className = "image-list";
 
@@ -445,18 +554,28 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
     }
 
     text.appendChild(imageList);
+
     const cleanText = remainingText.trim();
+
     if (cleanText) {
         const body = document.createElement("div");
         body.className = "stored-user-text";
         body.textContent = cleanText;
         text.appendChild(body);
+    } else {
+        // Image-only stored turn: mark it so previews can label it.
+        message.classList.add("pics-only");
     }
+
     message.append(meta, text);
     output.appendChild(message);
-    if (shouldScroll) output.scrollTop = output.scrollHeight;
+
+    if (shouldScroll && stickToBottom) output.scrollTop = output.scrollHeight;
     return text;
 }
+
+/* Auto-scroll is gated on stickToBottom so scrolling up mid-stream (or while
+   using the turn map) is not yanked back to the bottom. */
 
 function scheduleAssistantRender(element, content, generationId) {
     pendingAssistantRender = { element, content, generationId };
@@ -466,9 +585,11 @@ function scheduleAssistantRender(element, content, generationId) {
         assistantRenderFrame = null;
         const pending = pendingAssistantRender;
         pendingAssistantRender = null;
+
         if (!pending || pending.generationId !== currentGenerationId || !isGenerating) return;
+
         updateMessage(pending.element, "assistant", pending.content);
-        outputDiv.scrollTop = outputDiv.scrollHeight;
+        if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
     });
 }
 
@@ -477,25 +598,30 @@ function flushAssistantRender() {
         cancelAnimationFrame(assistantRenderFrame);
         assistantRenderFrame = null;
     }
+
     const pending = pendingAssistantRender;
     pendingAssistantRender = null;
+
     if (!pending || pending.generationId !== currentGenerationId) return;
+
     updateMessage(pending.element, "assistant", pending.content);
-    outputDiv.scrollTop = outputDiv.scrollHeight;
+    if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
 }
 
 function revokeObjectURL(url) {
     if (!url) return;
-    try { URL.revokeObjectURL(url); } catch {}
+    try { URL.revokeObjectURL(url); } catch { }
 }
 
 function clearInputUI() {
     ain.value = "";
     ain.style.height = "auto";
     ain.style.overflowY = "hidden";
+
     attachmentTray.querySelectorAll(".attachment-item[data-object-url]").forEach(item => {
         revokeObjectURL(item.dataset.objectUrl);
     });
+
     attachmentTray.replaceChildren();
     imgInput.value = "";
     pendingImages = [];
@@ -503,6 +629,7 @@ function clearInputUI() {
 
 function setGenerationUI(active) {
     isGenerating = active;
+
     if (active) {
         controlImg.src = "../../assets/square-solid-full.svg";
         controlBtn.style.setProperty("--snippet", '"Stop answering"');
@@ -522,10 +649,66 @@ function setGenerationUI(active) {
 
 function finishGeneration(generationId) {
     if (generationId !== currentGenerationId) return false;
+
     flushAssistantRender();
     currentAbortController = null;
     setGenerationUI(false);
     return true;
+}
+
+/* ------------------------------------------------------------- generation */
+
+function appendLiveUserTurn(output, query, files, shouldScroll = true) {
+    const message = document.createElement("div");
+    message.className = "msg user";
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = "You";
+
+    const text = document.createElement("div");
+    text.className = "text";
+
+    const cleanQuery = String(query ?? "").trim();
+
+    if (files.length) {
+        const imageList = document.createElement("div");
+        imageList.className = "image-list";
+
+        for (const file of files) {
+            const url = URL.createObjectURL(file);
+            const img = document.createElement("img");
+            img.className = "message-image";
+            img.alt = file.name || "Attached image";
+            img.src = url;
+            img.style.maxWidth = "400px";
+            img.style.maxHeight = "400px";
+            img.addEventListener("load", () => revokeObjectURL(url), { once: true });
+            img.addEventListener("error", () => {
+                revokeObjectURL(url);
+                img.replaceWith(createMissingImageLabel(file.name || "image"));
+            }, { once: true });
+
+            imageList.appendChild(img);
+        }
+
+        text.appendChild(imageList);
+    }
+
+    if (cleanQuery) {
+        const body = document.createElement("div");
+        body.className = "stored-user-text";
+        body.textContent = cleanQuery;
+        text.appendChild(body);
+    } else if (files.length) {
+        message.classList.add("pics-only");
+    }
+
+    message.append(meta, text);
+    output.appendChild(message);
+
+    if (shouldScroll && stickToBottom) output.scrollTop = output.scrollHeight;
+    return text;
 }
 
 async function sendMessage() {
@@ -537,40 +720,11 @@ async function sendMessage() {
     const generationId = ++currentGenerationId;
     const controller = new AbortController();
     currentAbortController = controller;
+
     const generationFiles = [...pendingImages];
+
     setGenerationUI(true);
-
-    if (query) appendMessage(outputDiv, "user", query);
-
-    if (generationFiles.length) {
-        const message = document.createElement("div");
-        message.className = "msg user";
-        const meta = document.createElement("div");
-        meta.className = "meta";
-        meta.textContent = "Pics";
-        const text = document.createElement("div");
-        text.className = "text image-list";
-
-        for (const file of generationFiles) {
-            const url = URL.createObjectURL(file);
-            const img = document.createElement("img");
-            img.className = "message-image";
-            img.alt = file.name || "Attached image";
-            img.src = url;
-            img.style.maxWidth = "400px";
-            img.style.maxHeight= "400px";
-            img.addEventListener("load", () => revokeObjectURL(url), { once: true });
-            img.addEventListener("error", () => {
-                revokeObjectURL(url);
-                img.replaceWith(createMissingImageLabel(file.name || "image"));
-            }, { once: true });
-            text.appendChild(img);
-        }
-        message.append(meta, text);
-        outputDiv.appendChild(message);
-        outputDiv.scrollTop = outputDiv.scrollHeight;
-    }
-
+    appendLiveUserTurn(outputDiv, query, generationFiles);
     clearInputUI();
 
     const loadingId = `loading-${Date.now()}-${generationId}`;
@@ -578,20 +732,20 @@ async function sendMessage() {
     loading.id = loadingId;
     loading.className = "msg assistant thinking";
     loading.textContent = "Assistant is thinking...";
-    outputDiv.appendChild(loading);
-    outputDiv.scrollTop = outputDiv.scrollHeight;
-    isHistory = false;
 
+    outputDiv.appendChild(loading);
+    if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+
+    isHistory = false;
     let assistantTextElement = null;
 
     try {
         const form = new FormData();
-
         form.append("query", query);
         form.append("websearch", isSearching);
         form.append("m-assist", modeSelectorAssistant.value);
-        form.append("b-assist", budgetSelectorAssistant.value)
-        form.append("m-coder",  modeSelectorCoder.value);
+        form.append("b-assist", budgetSelectorAssistant.value);
+        form.append("m-coder", modeSelectorCoder.value);
         form.append("b-coder", budgetSelectorCoder.value);
 
         for (const image of generationFiles) form.append("image", image);
@@ -602,6 +756,7 @@ async function sendMessage() {
             body: form,
             signal: controller.signal
         });
+
         if (!response.ok) throw new Error(`Server returned ${response.status}`);
         if (!response.body) throw new Error("Response body is not streamable");
 
@@ -616,6 +771,7 @@ async function sendMessage() {
 
         while (true) {
             if (generationId !== currentGenerationId) break;
+
             const { value, done } = await reader.read();
             if (done) {
                 streamFinished = true;
@@ -629,12 +785,12 @@ async function sendMessage() {
             for (const event of events) {
                 const line = event.trim();
                 if (!line.startsWith("data: ")) continue;
-                const data = line.slice(6);
 
+                const data = line.slice(6);
                 if (data === "[DONE]") {
                     streamFinished = true;
                     buffer = "";
-                    try { await reader.cancel(); } catch {}
+                    try { await reader.cancel(); } catch { }
                     break;
                 }
 
@@ -647,8 +803,10 @@ async function sendMessage() {
                     console.error("Stream parsing error:", error, data);
                 }
             }
+
             if (streamFinished) break;
         }
+
         //Append the leftovers if the request terminated earlier
         buffer += decoder.decode();
         if (generationId === currentGenerationId && buffer.trim()) {
@@ -662,17 +820,19 @@ async function sendMessage() {
                             fullResponse += token;
                             scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
                         }
-                    } catch {}
+                    } catch { }
                 }
             }
         }
 
         finishGeneration(generationId);
+
         if (controller.signal.aborted || generationId !== currentGenerationId || isStopping) return;
 
         try {
             const sumRes = await fetch(`${API}/sum`, { method: "POST" });
             if (!sumRes.ok) throw new Error(`Summary request failed: ${sumRes.status}`);
+
             const summaryBlock = await sumRes.json();
             header.innerText = summaryBlock.title || "New Chat";
             header.style.setProperty(
@@ -684,9 +844,11 @@ async function sendMessage() {
         }
     } catch (err) {
         flushAssistantRender();
-         if (err?.name === "AbortError" || controller.signal.aborted) {
+
+        if (err?.name === "AbortError" || controller.signal.aborted) {
             document.getElementById(loadingId)?.remove();
             console.log("Generation stopped by user.");
+
             if (generationId === currentGenerationId || generationId === stoppedGenerationId) {
                 const stopped = appendMessage(outputDiv, "assistant", "");
                 stopped.classList.add("generation-stopped");
@@ -700,6 +862,7 @@ async function sendMessage() {
         console.error(err);
     } finally {
         if (generationId === currentGenerationId) {
+            refreshTurnMap();
             currentAbortController = null;
             setGenerationUI(false);
         }
@@ -725,13 +888,14 @@ async function stopAnswering() {
     isStopping = true;
     stoppedGenerationId = currentGenerationId;
     ++currentGenerationId;
+
     currentAbortController = null;
     isGenerating = false;
     controlBtn.disabled = true;
     controlImg.src = "../../assets/square-solid-full.svg";
     controlBtn.style.setProperty("--snippet", '"Stopping..."');
 
-    try { controller.abort(); } catch {}
+    try { controller.abort(); } catch { }
 
     const startedAt = Date.now();
     await fetch(`${API}/stop`, { method: "POST", keepalive: true })
@@ -744,8 +908,9 @@ async function stopAnswering() {
 
     isStopping = false;
     setGenerationUI(false);
-    
 }
+
+/* ------------------------------------------------------------ attachments */
 
 imgBtn.addEventListener("click", () => {
     if (isBusy()) return;
@@ -758,9 +923,10 @@ function addToTray(files) {
 
     for (const file of picked) {
         if (!file.type?.startsWith("image/")) continue;
-        pendingImages.push(file);
 
+        pendingImages.push(file);
         const url = URL.createObjectURL(file);
+
         const wrapper = document.createElement("div");
         wrapper.className = "attachment-item";
         wrapper.dataset.objectUrl = url;
@@ -794,6 +960,7 @@ function addToTray(files) {
         wrapper.append(img, remove);
         attachmentTray.appendChild(wrapper);
     }
+
     imgInput.value = "";
 }
 
@@ -801,6 +968,7 @@ imgInput.addEventListener("change", () => addToTray());
 
 document.addEventListener("paste", event => {
     if (isBusy()) return;
+
     const clipboard = event.clipboardData;
     if (!clipboard) return;
 
@@ -810,6 +978,7 @@ document.addEventListener("paste", event => {
         const blob = item.getAsFile();
         if (blob) blobs.push(blob);
     }
+
     if (blobs.length) addToTray(blobs);
 });
 
@@ -822,21 +991,20 @@ ain.addEventListener("keydown", event => {
 
 controlBtn.onclick = send;
 
-
+/* ----------------------------------------------------------- header menu */
 
 selectContainers.forEach(container => {
     const select = container.querySelector("select");
     if (!select) return;
+
     select.addEventListener("focus", () => container.classList.add("no-after"));
-    select.addEventListener("blur",  () => container.classList.remove("no-after"));
+    select.addEventListener("blur", () => container.classList.remove("no-after"));
 });
-
-
-
 
 function setMenu(open) {
     if (menuOpen === open) return;
     menuOpen = open;
+
     headerMenu.classList.toggle("open", open);
     headerMenuBtn.setAttribute("aria-expanded", String(open));
 }
@@ -859,6 +1027,500 @@ document.addEventListener("keydown", event => {
     setMenu(false);
 });
 
+/* ============================================================================
+   TURN MINI-MAP
+
+   One logical bar per user turn. A turn is represented by exactly one
+   .msg.user bubble, including text + attachments. The active bar is derived
+   from the user's scroll position rather than IntersectionObserver ratios.
+   ========================================================================== */
+
+/* Injected so the feature works even if style.css / index.html were not
+   updated. Move to style.css and delete this block if you prefer. */
+
+const TURN_MAP_CSS = `
+.turns-col{
+    grid-area: list;
+    position: relative;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 10px;
+    overflow: visible;
+}
+
+.turn-map{
+    position: relative;
+    align-self: center;
+    display: flex;
+    align-items: center;
+    padding: 8px 4px;
+    z-index: 60;
+}
+
+/* Invisible bridge keeps the parent hovered while the pointer moves from
+   the fixed bars into the absolutely-positioned list. */
+.turn-map::before{
+    content: "";
+    position: absolute;
+    top: -12px;
+    left: -300px;
+    width: 300px;
+    height: calc(100% + 24px);
+    z-index: 1;
+}
+
+.turn-map-bars{
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    align-items: flex-end;
+}
+
+.turn-bar{
+    width: 22px;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(128,128,128,.28);
+    cursor: pointer;
+    transition: width .15s ease, background .15s ease, height .15s ease;
+}
+
+.turn-bar:hover{
+    width: 28px;
+    background: rgba(60,60,60,.55);
+}
+
+.turn-bar.active{
+    width: 28px;
+    height: 5px;
+    background: rgba(0,0,0,.82);
+}
+
+.turn-map-list{
+    position: absolute;
+    z-index: 3;
+    right: calc(100% + 8px);
+    top: 50%;
+    transform: translateY(-50%);
+    width: 280px;
+    max-height: min(360px, 50vh);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 6px;
+    border-radius: 10px;
+    border: 1px solid rgba(128,128,128,.25);
+    background: #ffffff;
+    box-shadow: 0 10px 28px rgba(0,0,0,.18);
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity .18s ease, visibility .18s ease;
+    pointer-events: none;
+}
+
+.turn-map:hover .turn-map-list,
+.turn-map-list:hover{
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+}
+
+.turn-map-empty{
+    padding: 8px 10px;
+    font-size: 12px;
+    opacity: .5;
+}
+
+.turn-map-item{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 7px 9px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12.5px;
+    text-align: left;
+}
+
+.turn-map-item:hover,
+.turn-map-item:focus-visible{
+    background: rgba(128,128,128,.14);
+    outline: none;
+}
+
+.turn-map-item.active{
+    background: rgba(33,150,243,.16);
+}
+
+.turn-map-item .tm-idx{
+    flex: 0 0 auto;
+    min-width: 18px;
+    font-size: 10.5px;
+    opacity: .5;
+    font-variant-numeric: tabular-nums;
+}
+
+.turn-map-item .tm-preview{
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+@media (max-width: 640px){
+    .turn-bar{ width: 16px; }
+    .turn-bar:hover,
+    .turn-bar.active{ width: 20px; }
+    .turn-map-list{ width: 220px; }
+}
+`;
+
+function injectTurnMapStyles() {
+    if (document.getElementById("turn-map-styles")) return;
+
+    const style = document.createElement("style");
+    style.id = "turn-map-styles";
+    style.textContent = TURN_MAP_CSS;
+    document.head.appendChild(style);
+}
+
+function ensureTurnMapMarkup() {
+    let col = document.querySelector(".turns-col") || document.getElementById("turns-col");
+
+    if (!col) {
+        col = document.createElement("div");
+        col.className = "turns-col";
+        col.id = "turns-col";
+
+        const content = document.querySelector(".content");
+        if (!content) return null;
+        content.appendChild(col);
+    }
+
+    const existing = col.querySelector(".turn-map");
+    if (existing) {
+        turnMapEl = existing;
+        turnMapBarsEl = existing.querySelector(".turn-map-bars");
+        turnMapListEl = existing.querySelector(".turn-map-list");
+
+        if (turnMapBarsEl && turnMapListEl) return true;
+    }
+
+    col.querySelectorAll(".turns-anchor, .turns-toggle, .turns-popover").forEach(el => el.remove());
+
+    const map = document.createElement("div");
+    map.className = "turn-map";
+    map.id = "turnMap";
+    map.setAttribute("aria-label", "Turn mini-map");
+
+    const bars = document.createElement("div");
+    bars.className = "turn-map-bars";
+    bars.id = "turnMapBars";
+
+    const list = document.createElement("div");
+    list.className = "turn-map-list";
+    list.id = "turnMapList";
+    list.setAttribute("role", "listbox");
+    list.setAttribute("aria-label", "Turns in this conversation");
+
+    map.append(bars, list);
+    col.appendChild(map);
+
+    turnMapEl = map;
+    turnMapBarsEl = bars;
+    turnMapListEl = list;
+
+    return true;
+}
+
+function previewFromBubble(bubble) {
+    const clone = bubble.cloneNode(true);
+    clone.querySelectorAll(
+        ".meta, .image-list, .msg-meta, .msg-actions, .msg-images, .msg-loading"
+    ).forEach(el => el.remove());
+
+    const text = (clone.textContent || "").replace(/\s+/g, " ").trim();
+    if (!text) return bubble.classList.contains("pics-only") ? "📎 Image" : "";
+
+    return text.length > 80 ? text.slice(0, 80) + "\u2026" : text;
+}
+
+function getTurnPreview(bubble) {
+    const preview = previewFromBubble(bubble);
+    return preview || "Turn";
+}
+
+function setActiveTurn(index) {
+    if (index === activeTurnIndex) return;
+
+    activeTurnIndex = index;
+
+    turnBars.forEach((tb, i) => {
+        const active = i === activeTurnIndex;
+        tb.bar.classList.toggle("active", active);
+        tb.item.classList.toggle("active", active);
+    });
+}
+
+function updateActiveTurn() {
+    if (!turnBars.length) {
+        setActiveTurn(-1);
+        return;
+    }
+
+    let bestIdx = -1;
+    let bestRatio = -1;
+
+    for (const [idx, ratio] of visibleTurns) {
+        if (ratio > bestRatio) {
+            bestRatio = ratio;
+            bestIdx = idx;
+        }
+    }
+
+    if (bestIdx === -1) {
+        const rootRect = turnScrollRoot.getBoundingClientRect();
+        const referenceY = rootRect.top + Math.min(rootRect.height * 0.35, 220);
+
+        bestIdx = 0;
+        for (let i = 0; i < turnBars.length; i++) {
+            if (turnBars[i].bubble.getBoundingClientRect().top <= referenceY) bestIdx = i;
+            else break;
+        }
+    }
+
+    setActiveTurn(bestIdx);
+}
+
+function scheduleActiveTurnUpdate() {
+    if (turnMapScrollFrame !== null) return;
+
+    turnMapScrollFrame = requestAnimationFrame(() => {
+        turnMapScrollFrame = null;
+        updateActiveTurn();
+    });
+}
+
+function buildTurnMap() {
+    if (!turnMapBarsEl || !turnMapListEl) return;
+
+    const bubbles = Array.from(outputDiv.children).filter(node =>
+        node instanceof HTMLElement && node.classList.contains("msg") && node.classList.contains("user")
+    );
+
+    if (turnObserver) {
+        turnObserver.disconnect();
+        turnObserver = null;
+    }
+
+    visibleTurns.clear();
+    turnMapBarsEl.replaceChildren();
+    turnMapListEl.replaceChildren();
+    turnBars = [];
+
+    bubbles.forEach(bubble => {
+        const preview = getTurnPreview(bubble);
+        if (!preview) return;
+
+        if (!bubble.dataset.turnId) {
+            bubble.dataset.turnId = `turn-${++turnIdCounter}`;
+        }
+
+        const bar = document.createElement("div");
+        bar.className = "turn-bar";
+        bar.dataset.turnId = bubble.dataset.turnId;
+        bar.setAttribute("role", "button");
+        bar.setAttribute("tabindex", "0");
+
+        const turnNumber = turnBars.length + 1;
+        bar.setAttribute("aria-label", `Go to turn ${turnNumber}: ${preview}`);
+        bar.title = `${turnNumber}. ${preview}`;
+
+        const navigate = () => scrollToUserBubble(bubble);
+        bar.addEventListener("click", navigate);
+        bar.addEventListener("keydown", event => {
+            if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                navigate();
+            }
+        });
+
+        const item = document.createElement("button");
+        item.type = "button";
+        item.className = "turn-map-item";
+        item.dataset.turnId = bubble.dataset.turnId;
+        item.setAttribute("role", "option");
+
+        const idx = document.createElement("span");
+        idx.className = "tm-idx";
+        idx.textContent = String(turnNumber);
+
+        const prev = document.createElement("span");
+        prev.className = "tm-preview";
+        prev.textContent = preview;
+
+        item.append(idx, prev);
+        item.addEventListener("click", navigate);
+
+        turnMapBarsEl.appendChild(bar);
+        turnMapListEl.appendChild(item);
+
+        turnBars.push({ bar, item, bubble, preview, turnId: bubble.dataset.turnId });
+    });
+
+    if (!turnBars.length) {
+        const empty = document.createElement("div");
+        empty.className = "turn-map-empty";
+        empty.textContent = "No turns yet";
+        turnMapListEl.appendChild(empty);
+        setActiveTurn(-1);
+        return;
+    }
+
+    /* Observe against the viewport. The chat is currently scrolled by .content,
+       so using .output as the observer root would never see those movements. */
+    turnObserver = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+            const idx = Number(entry.target.dataset.turnMapWatch);
+            if (!Number.isInteger(idx)) continue;
+
+            if (entry.isIntersecting) visibleTurns.set(idx, entry.intersectionRatio);
+            else visibleTurns.delete(idx);
+        }
+
+        scheduleActiveTurnUpdate();
+    }, {
+        root: null,
+        rootMargin: "-50px 0px -55% 0px",
+        threshold: [0, 0.1, 0.25, 0.5, 0.75, 1]
+    });
+
+    turnBars.forEach((tb, index) => {
+        tb.bubble.dataset.turnMapWatch = String(index);
+        turnObserver.observe(tb.bubble);
+    });
+
+    activeTurnIndex = -1;
+    scheduleActiveTurnUpdate();
+}
+
+function refreshTurnMap() {
+    if (!turnMapBarsEl || !turnMapListEl) {
+        if (!ensureTurnMapMarkup()) return;
+    }
+
+    if (turnMapBuildFrame !== null) return;
+
+    turnMapBuildFrame = requestAnimationFrame(() => {
+        turnMapBuildFrame = null;
+        buildTurnMap();
+    });
+}
+
+function refreshTurnMapNow() {
+    if (!ensureTurnMapMarkup()) return;
+
+    if (turnMapBuildFrame !== null) {
+        cancelAnimationFrame(turnMapBuildFrame);
+        turnMapBuildFrame = null;
+    }
+
+    buildTurnMap();
+}
+
+function scrollToUserBubble(bubble) {
+    if (!bubble || !bubble.isConnected) return;
+
+    const rootRect = turnScrollRoot.getBoundingClientRect();
+    const bubbleRect = bubble.getBoundingClientRect();
+
+    const target = turnScrollRoot.scrollTop +
+        (bubbleRect.top - rootRect.top) - 12;
+
+    stickToBottom = false;
+
+    turnScrollRoot.scrollTo({
+        top: Math.max(0, target),
+        behavior: "smooth"
+    });
+
+    scheduleActiveTurnUpdate();
+}
+
+function maybeStickToBottom() {
+    const gap = outputDiv.scrollHeight - outputDiv.scrollTop - outputDiv.clientHeight;
+    stickToBottom = gap < 60;
+}
+
+turnScrollRoot.addEventListener("scroll", scheduleActiveTurnUpdate, { passive: true });
+
+outputDiv.addEventListener("scroll", () => {
+    maybeStickToBottom();
+    scheduleActiveTurnUpdate();
+}, { passive: true });
+
+window.addEventListener("resize", () => {
+    const nextRoot = document.querySelector(".content") || outputDiv;
+
+    if (nextRoot !== turnScrollRoot) {
+        turnScrollRoot = nextRoot;
+        refreshTurnMapNow();
+    }
+
+    scheduleActiveTurnUpdate();
+});
+
+function initTurnMap() {
+    injectTurnMapStyles();
+
+    if (!ensureTurnMapMarkup()) {
+        console.error("Turn map: .content container not found");
+        return;
+    }
+
+    buildTurnMap();
+
+    if (turnMapMO) turnMapMO.disconnect();
+
+    turnMapMO = new MutationObserver(mutations => {
+        let turnsChanged = false;
+
+        for (const mutation of mutations) {
+            if (mutation.target !== outputDiv || mutation.type !== "childList") continue;
+
+            const relevant = [...mutation.addedNodes, ...mutation.removedNodes].some(node =>
+                node instanceof HTMLElement && node.classList.contains("msg") && node.classList.contains("user")
+            );
+
+            if (relevant) {
+                turnsChanged = true;
+                break;
+            }
+        }
+
+        if (turnsChanged) refreshTurnMap();
+    });
+
+    turnMapMO.observe(outputDiv, { childList: true });
+    refreshTurnMap();
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initTurnMap);
+} else {
+    initTurnMap();
+}
+
+/* ---------------------------------------------------------------- save btn */
+
 saveBtn.addEventListener("click", async () => {
     try {
         const result = await saveCurrentChat(0);
@@ -872,4 +1534,3 @@ saveBtn.addEventListener("click", async () => {
         // toast: "Save failed"
     }
 });
-
