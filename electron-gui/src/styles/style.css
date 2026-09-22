@@ -197,9 +197,9 @@ html, body {
     column-gap: 10px;
     align-items: center;
     justify-content: center;
-    background-color: #ffffff; 
+    background-color: #ffffff;
     padding-bottom: 30px;
-    overflow-y:auto;
+    overflow-y: auto;
 }
 
 .filler {
@@ -242,7 +242,7 @@ html, body {
 
 
 
-.sub-content{
+.sub-content {
     grid-area: main;
     display: grid;
     grid-template-rows: 1fr 100px;
@@ -254,10 +254,10 @@ html, body {
 .output {
     grid-area: output;
     height: 100%;
-    overflow-y: auto; 
-    overflow-x: hidden; 
+    overflow-y: auto;
+    overflow-x: hidden;
     display: flex;
-    flex-direction: column; 
+    flex-direction: column;
 }
 
 
@@ -807,4 +807,25 @@ input:checked + .slider:before {
 .katex .fbox-box[style*="width:0"],
 .katex .fbox-box[style*="width: 0"] {
     display: none !important;
+}
+
+
+/* ===== Static/fixed turn-map column =====
+   The main .content area remains the scroll container, while the turn map
+   stays pinned to the viewport and therefore never scrolls away. */
+.turns-col {
+    position: fixed !important;
+    top: 50px;
+    right: 0;
+    bottom: 0;
+    width: 25vw;
+    height: auto !important;
+    box-sizing: border-box;
+    z-index: 60;
+    pointer-events: none;
+    overflow: visible;
+}
+
+.turns-col .turn-map {
+    pointer-events: auto;
 }
