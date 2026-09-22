@@ -1466,10 +1466,9 @@ async def ask(request: Request):
         },
     )
 
-
-def finalize_session(chat_id=None):
+def persist_session(chat_id=None):
     """Persist saved_turns + current short-term memory as one canonical chat."""
-
+    
     with assistant.finalize_lock:
         if (
             chat_id
@@ -1640,33 +1639,81 @@ def finalize_session(chat_id=None):
             assistant.pending_profile_inputs
         ).strip()
 
-        if session_user_text:
-            try:
-                assistant.auto_update_profile(session_user_text)
-            except Exception as e:
-                print(
-                    "[Observer]: Final profile update failed: "
-                    f"{e}"
-                )
+
+        return {
+            "status": "success",
+            "chat_id": saved_id,
+        }, 200
 
         # Invalidate any worker associated with the old chat and clear all
         # transient memory state. stop_memory_compaction() is called by the
         # async /save and /shutdown handlers before entering this sync method.
-        assistant.reset_chat_state()
 
-        print(
-            " [System] Session finalized and "
-            "archived to Long-Term Memory."
-        )
+def finalize_session(chat_id=None):
+    payload, status_code = persist_session(chat_id)
 
-        return {
-            "status": "success",
-            "id": saved_id,
-        }, 200
+    if status_code != 200:
+        return payload, status_code
 
+    session_user_text = "\n\n".join(
+        assistant.pending_profile_inputs
+    ).strip()
+
+    if session_user_text:
+        try:
+            assistant.auto_update_profile(session_user_text)
+        except Exception as e:
+            print(
+                "[Observer]: Final profile update failed: "
+                f"{e}"
+            )
+
+    assistant.reset_chat_state()
+
+    print(
+        " [System] Session finalized and "
+        "archived to Long-Term Memory."
+    )
+
+    return payload, status_code
 
 @app.post("/save")
 async def save_session_to_long_term(
+    request: Request,
+):
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    try:
+        form = await request.form()
+    except Exception:
+        form = {}
+
+    chat_id = (
+        form.get("chat_id")
+        or data.get("chat_id")
+        or None
+    )
+
+    if not await stop_active_generation():
+        return JSONResponse(content={"status": "error", "message": "Active generation did not stop."}, status_code=409)
+
+    await assistant.stop_memory_compaction()
+
+    payload, status_code = await asyncio.to_thread(
+        persist_session,
+        chat_id,
+    )
+
+    return JSONResponse(
+        content=payload,
+        status_code=status_code,
+    )
+
+@app.post("/finilize")
+async def finilize_current_chat(
     request: Request,
 ):
     try:
@@ -1699,6 +1746,8 @@ async def save_session_to_long_term(
         content=payload,
         status_code=status_code,
     )
+
+    
 
 
 @app.get("/history")
