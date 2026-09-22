@@ -25,6 +25,7 @@ const budgetSelectorCoder = document.getElementById("hm-coder-2");
 
 let currentAbortController = null;
 let currentGenerationId = 0;
+let stoppedGenerationId = 0;
 let isGenerating = false;
 let isStopping = false;
 let chatLoadGeneration = 0;
@@ -42,7 +43,7 @@ let menuOpen = false;
 
 const isEmpty = () => outputDiv.children.length === 0;
 const API = "http://localhost:5000";
-const isBusy = () => isSaving || isGenerating || isStopping;
+const isBusy = () => isSaving || isGenerating || isStopping || navigationInFlight !== null;
 
 function setBusy(busy) {
     isSaving = busy;
@@ -78,7 +79,7 @@ async function saveCurrentChat(option) {
                 saveRes = await fetch(`${API}/finilize`, { method: "POST", body: form });
                 if (!saveRes.ok) throw new Error(`Save request failed: ${saveRes.status}`);
             }
-            
+
             const saveJson = await saveRes.json();
             if (saveJson.id) currentChatId = saveJson.id;
 
@@ -271,7 +272,7 @@ async function chatMenu(type) {
             const response = await fetch(`${API}/delete`, { method: "POST", body: form });
             if (!response.ok) throw new Error(`Delete request failed: ${response.status}`);
             await loadSidebarHistory();
-            resetChat();
+            if (id === currentChatId) resetChat();
         } else {
             console.error("Unknown menu action");
         }
@@ -294,9 +295,15 @@ async function loadChat(chatId) {
             if (isBusy()) return;
 
             if (!isHistory && !isEmpty()) {
-                const saved = await saveCurrentChat(1);
-                if (saved === null && isBusy()) return;
+                try {
+                    const saved = await saveCurrentChat(1);
+                    if (saved === null && isBusy()) return;
+                } catch (err) {
+                    console.error("Auto-save before navigation failed:", err);
+                    // decide: proceed anyway or abort navigation. Proceeding below.
+                }
             }
+
             if (loadId !== chatLoadGeneration) return;
 
             const response = await fetch(`${API}/chat/${encodeURIComponent(requestedChatId)}`);
@@ -338,7 +345,10 @@ function resetChat() {
 
 newBtn.addEventListener("click", async () => {
     if (isBusy()) return;
-    if (!isHistory && !isEmpty()) await saveCurrentChat(1);
+    if (!isHistory && !isEmpty()) {
+        try { await saveCurrentChat(1); }
+        catch (err) { console.error("Auto-save before new chat failed:", err); }
+    }
     resetChat();
 });
 
@@ -639,7 +649,7 @@ async function sendMessage() {
             }
             if (streamFinished) break;
         }
-
+        //Append the leftovers if the request terminated earlier
         buffer += decoder.decode();
         if (generationId === currentGenerationId && buffer.trim()) {
             const finalLine = buffer.trim();
@@ -648,7 +658,10 @@ async function sendMessage() {
                 if (data !== "[DONE]") {
                     try {
                         const token = JSON.parse(data).token;
-                        if (token) fullResponse += token;
+                        if (token) {
+                            fullResponse += token;
+                            scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
+                        }
                     } catch {}
                 }
             }
@@ -671,10 +684,10 @@ async function sendMessage() {
         }
     } catch (err) {
         flushAssistantRender();
-        if (err?.name === "AbortError" || controller.signal.aborted) {
+         if (err?.name === "AbortError" || controller.signal.aborted) {
             document.getElementById(loadingId)?.remove();
             console.log("Generation stopped by user.");
-            if (generationId === currentGenerationId) {
+            if (generationId === currentGenerationId || generationId === stoppedGenerationId) {
                 const stopped = appendMessage(outputDiv, "assistant", "");
                 stopped.classList.add("generation-stopped");
                 stopped.textContent = "Generation stopped by user";
@@ -710,6 +723,7 @@ async function stopAnswering() {
     }
 
     isStopping = true;
+    stoppedGenerationId = currentGenerationId;
     ++currentGenerationId;
     currentAbortController = null;
     isGenerating = false;
@@ -717,13 +731,20 @@ async function stopAnswering() {
     controlImg.src = "../../assets/square-solid-full.svg";
     controlBtn.style.setProperty("--snippet", '"Stopping..."');
 
-    void fetch(`${API}/stop`, { method: "POST", keepalive: true }).catch(error => {
-        console.warn("Backend stop request failed:", error);
-    });
-
     try { controller.abort(); } catch {}
+
+    const startedAt = Date.now();
+    await fetch(`${API}/stop`, { method: "POST", keepalive: true })
+        .catch(error => console.warn("Backend stop request failed:", error));
+
+    // Small floor so the "Stopping..." state is visible and the 6-stage
+    // backend watchdog has a head start before new input is re-enabled.
+    const elapsed = Date.now() - startedAt;
+    if (elapsed < 300) await new Promise(r => setTimeout(r, 300 - elapsed));
+
     isStopping = false;
     setGenerationUI(false);
+    
 }
 
 imgBtn.addEventListener("click", () => {
@@ -839,7 +860,16 @@ document.addEventListener("keydown", event => {
 });
 
 saveBtn.addEventListener("click", async () => {
-    await saveCurrentChat(0);
-    print("Chat saved.")
-})
+    try {
+        const result = await saveCurrentChat(0);
+        if (result === null) {
+            console.warn("Save skipped (busy).");
+            return;
+        }
+        console.log("Chat saved.", result);
+    } catch (err) {
+        console.error("Save failed:", err);
+        // toast: "Save failed"
+    }
+});
 
