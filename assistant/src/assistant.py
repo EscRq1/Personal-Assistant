@@ -2042,41 +2042,6 @@ class ToolController:
         )
 
     # ========================================================
-    # APPEND TOOL EXCHANGE TO ACTIVE CONTEXT
-    # ========================================================
-
-    def append_tool_results(
-        self,
-        messages: list[dict],
-        assistant_content: str,
-        tool_calls: list[dict],
-        results: list[dict],
-    ) -> None:
-        """
-        Append:
-
-            assistant tool-call message
-            +
-            one tool message per result
-
-        to the current working conversation.
-        """
-
-        messages.append(
-            self.build_assistant_tool_message(
-                content=assistant_content,
-                tool_calls=tool_calls,
-            )
-        )
-
-        for result in results:
-            messages.append(
-                self.build_tool_message(
-                    result
-                )
-            )
-
-    # ========================================================
     # DEBUG LOGGING
     # ========================================================
     def get_available_tools(
