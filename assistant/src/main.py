@@ -89,6 +89,10 @@ class Main:
         self.compaction_task = None
         self.compaction_context = None
 
+        # True only while an Observer compaction cycle actually owns the
+        # singleton model backend. /ask is rejected while this is true.
+        self.compaction_active = False
+
         self.compaction_generation = 0
         self.short_term_generation = 0
         self.chat_state_generation = 0
@@ -200,9 +204,23 @@ class Main:
             else:
                 task.cancel()
 
+        clear_compaction_owner = False
+
         with self.compaction_lock:
-            self.compaction_task = None
             self.pending_compaction_blocks.clear()
+
+            # If no compaction task exists, no callback will be responsible
+            # for clearing compaction_active. Otherwise leave task/context
+            # intact so its done callback can release ownership safely.
+            if task is None:
+                self.compaction_task = None
+                self.compaction_context = None
+                clear_compaction_owner = True
+
+        if clear_compaction_owner:
+            with self.generation_lock:
+                self.compaction_active = False
+
         self.short_term_memory.clear()
         self.saved_turns.clear()
         self.compacted_short_term_memory = ""
@@ -385,78 +403,59 @@ class Main:
         generation = self.chat_state_generation
 
         def create_task():
-            with self.compaction_lock:
-                if not self.pending_compaction_blocks:
+            # generation_lock is the admission gate shared by /ask and
+            # compaction. Either generation or compaction may own the backend,
+            # never both.
+            with self.generation_lock:
+                if self.generation_context is not None:
+                    # An active user generation always wins. Compaction stays
+                    # queued until that generation completely unwinds.
                     return
 
-                if (
-                    self.compaction_task is not None
-                    and not self.compaction_task.done()
-                ):
-                    return
+                with self.compaction_lock:
+                    if not self.pending_compaction_blocks:
+                        return
 
-                ctx = ExecutionContext()
-                self.compaction_context = ctx
+                    if (
+                        self.compaction_task is not None
+                        and not self.compaction_task.done()
+                    ):
+                        return
 
-                self.compaction_task = asyncio.create_task(
-                    self.compact_short_term_memory(
-                        chat_state_generation=generation,
-                        ctx=ctx,
+                    ctx = ExecutionContext()
+                    self.compaction_context = ctx
+                    self.compaction_active = True
+
+                    self.compaction_task = asyncio.create_task(
+                        self.compact_short_term_memory(
+                            chat_state_generation=generation,
+                            ctx=ctx,
+                        )
                     )
-                )
 
-                self.compaction_task.add_done_callback(
-                    self._memory_compaction_done
-                )
+                    self.compaction_task.add_done_callback(
+                        self._memory_compaction_done
+                    )
+
+            print(
+                "[MEMORY] Compaction acquired backend ownership."
+            )
 
         # Task creation and Task.done() inspection happen on the FastAPI
         # event loop that owns the task.
         self.api_loop.call_soon_threadsafe(create_task)
 
-    def schedule_memory_compaction(self, rolled_over_memory):
-        """Queue a raw block for background Observer compaction."""
-
-        if rolled_over_memory:
-            with self.compaction_lock:
-                self.pending_compaction_blocks.append(rolled_over_memory)
-
-        self._ensure_compaction_task()
-
-        print(
-            "[MEMORY] Background compaction scheduled "
-            f"(chat_generation={self.chat_state_generation})"
-        )
-
-    def memory_overflow_observer(self):
-        """Roll over raw memory when the live block exceeds the hard limit."""
-
-        token_count = estimate_tokens(
-            self.short_term_memory
-        )
-
-        print(
-            f"[MEMORY] live short-term tokens={token_count}/"
-            f"{MAX_MEMORY_TOKENS}"
-        )
-
-        if token_count <= MAX_MEMORY_TOKENS:
-            return
-
-        rolled_over = self.rollover_short_term_memory()
-
-        if rolled_over:
-            self.schedule_memory_compaction(rolled_over)
-
     async def stop_memory_compaction(self):
-        """Stop background compaction before saving or shutting down."""
+        """Stop background compaction and wait for the physical Observer request."""
 
-        task = self.compaction_task
-        ctx = self.compaction_context
+        with self.compaction_lock:
+            task = self.compaction_task
+            ctx = self.compaction_context
 
         if ctx is not None:
             ctx.cancel_event.set()
 
-        # Wait until the Observer has actually stopped.
+        # Wait until the logical compaction task has unwound.
         if task is not None and not task.done():
             try:
                 await asyncio.wait_for(task, timeout=5.0)
@@ -473,6 +472,23 @@ class Main:
                     f"[MEMORY] Background compaction stop failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
+
+        # Cancelling compact_short_term_memory() does not forcibly kill a
+        # Python worker thread. Wait for the physical llama request too,
+        # otherwise the next model switch could unload Observer underneath
+        # that still-running request.
+        if ctx is not None and not ctx.llm_done.is_set():
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(ctx.llm_done.wait),
+                    timeout=15.0,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    "[MEMORY] Observer inference did not stop safely; "
+                    "keeping compaction ownership active."
+                )
+                return False
 
         # Any blocks still pending were never successfully committed
         # into compacted_short_term_memory, so move them back from the
@@ -495,6 +511,11 @@ class Main:
             self.compaction_task = None
             self.compaction_context = None
 
+        with self.generation_lock:
+            self.compaction_active = False
+
+        return True
+
     def _memory_compaction_done(self, task):
         try:
             task.result()
@@ -509,6 +530,7 @@ class Main:
             with self.compaction_lock:
                 owns_task = self.compaction_task is task
                 task_ctx = self.compaction_context if owns_task else None
+
                 if owns_task:
                     self.compaction_task = None
                     self.compaction_context = None
@@ -516,10 +538,35 @@ class Main:
                 else:
                     pending = False
 
-            # A canceled compaction is being explicitly drained by save/shutdown
-            # or reset. Do not immediately start another worker in that case.
-            if pending and not (task_ctx and task_ctx.cancel_event.is_set()):
+            # A canceled compaction is being explicitly drained by save,
+            # shutdown, or reset. Do not immediately start another worker.
+            canceled = bool(task_ctx and task_ctx.cancel_event.is_set())
+
+            if owns_task and pending and not canceled:
+                # Keep compaction_active=True across consecutive blocks so
+                # /ask cannot slip in between two Observer compaction passes.
                 self._ensure_compaction_task()
+                return
+
+            if owns_task:
+                # Normal completion means the physical Observer request has
+                # already unwound. A cancellation can finish the asyncio task
+                # before the underlying worker thread, so keep the backend
+                # admission gate closed in that case.
+                if task_ctx is not None and not task_ctx.llm_done.is_set():
+                    async def release_backend_after_physical_stop():
+                        await asyncio.to_thread(task_ctx.llm_done.wait)
+                        with self.generation_lock:
+                            self.compaction_active = False
+                        print(
+                            "[MEMORY] Compaction backend ownership released "
+                            "after physical Observer inference stopped."
+                        )
+
+                    asyncio.create_task(release_backend_after_physical_stop())
+                else:
+                    with self.generation_lock:
+                        self.compaction_active = False
 
     def run_llm_sync(
         self,
@@ -1025,7 +1072,23 @@ class Main:
         })
 
         self.short_term_generation += 1
-        self.memory_overflow_observer()
+
+        token_count = estimate_tokens(self.short_term_memory)
+        print(
+            f"[MEMORY] live short-term tokens={token_count}/"
+            f"{MAX_MEMORY_TOKENS}"
+        )
+
+        if token_count > MAX_MEMORY_TOKENS:
+            rolled_over = self.rollover_short_term_memory()
+            if rolled_over:
+                with self.compaction_lock:
+                    self.pending_compaction_blocks.append(rolled_over)
+                self._ensure_compaction_task()
+                print(
+                    "[MEMORY] Background compaction scheduled "
+                    f"(chat_generation={self.chat_state_generation})"
+                )
 
         self._refresh_current_chat_index()
 
@@ -1305,14 +1368,26 @@ async def ask(request: Request):
 
     print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
 
-    # Reserve the singleton session before loading/switching chats.
-    # A second /ask must fail rather than touching global state concurrently.
+    # Reserve the singleton backend before loading/switching chats.
+    #
+    # Generation and memory compaction are mutually exclusive because both
+    # use the same llama-router with models-max=1. During compaction we do not
+    # queue a new /ask; the client must retry after Observer releases the backend.
     with assistant.generation_lock:
+        if assistant.compaction_active:
+            return JSONResponse(
+                content={
+                    "error": "Memory compaction is in progress. Retry after it finishes."
+                },
+                status_code=409,
+            )
+
         if assistant.generation_context is not None:
             return JSONResponse(
                 content={"error": "Another generation is already running."},
                 status_code=409,
             )
+
         ctx.generation_done.clear()
         ctx.chat_id = chat_id or assistant.current_chat_id
         assistant.generation_context = ctx
@@ -1435,9 +1510,18 @@ async def ask(request: Request):
     )
 
     def on_generation_finished(finished_ctx):
+        should_start_compaction = False
+
         with assistant.generation_lock:
             if assistant.generation_context is finished_ctx:
                 assistant.generation_context = None
+                should_start_compaction = True
+
+        # Start queued compaction only after the logical generation has fully
+        # unwound. _ensure_compaction_task() re-checks the same admission gate
+        # on the FastAPI event loop.
+        if should_start_compaction:
+            assistant._ensure_compaction_task()
 
     def generate():
         try:
@@ -1792,7 +1876,14 @@ async def save_session_to_long_term(
     if not await stop_active_generation():
         return JSONResponse(content={"status": "error", "message": "Active generation did not stop."}, status_code=409)
 
-    await assistant.stop_memory_compaction()
+    if not await assistant.stop_memory_compaction():
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Memory compaction is still running.",
+            },
+            status_code=409,
+        )
 
     payload, status_code = await asyncio.to_thread(
         persist_session,
@@ -1827,7 +1918,14 @@ async def finilize_current_chat(
     if not await stop_active_generation():
         return JSONResponse(content={"status": "error", "message": "Active generation did not stop."}, status_code=409)
 
-    await assistant.stop_memory_compaction()
+    if not await assistant.stop_memory_compaction():
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Memory compaction is still running.",
+            },
+            status_code=409,
+        )
 
     payload, status_code = await asyncio.to_thread(
         finalize_session,
@@ -2046,7 +2144,14 @@ async def shutdown_session(
         or None
     )
 
-    await assistant.stop_memory_compaction()
+    if not await assistant.stop_memory_compaction():
+        return JSONResponse(
+            content={
+                "status": "error",
+                "message": "Memory compaction is still running.",
+            },
+            status_code=409,
+        )
 
     payload, status_code = await asyncio.to_thread(
         finalize_session,
@@ -2143,7 +2248,14 @@ async def delete(request: Request):
                 },
                 status_code=409,
             )
-        await assistant.stop_memory_compaction()
+        if not await assistant.stop_memory_compaction():
+            return JSONResponse(
+                content={
+                    "status": "error",
+                    "message": "Memory compaction is still running.",
+                },
+                status_code=409,
+            )
 
     ok = await asyncio.to_thread(
         assistant.memory.delete_history,
@@ -2320,6 +2432,7 @@ def debug_memory():
         ),
 
         "compaction_generation": assistant.compaction_generation,
+        "compaction_active": assistant.compaction_active,
         "short_term_generation": assistant.short_term_generation,
         "chat_state_generation": assistant.chat_state_generation,
         "current_chat_id": assistant.current_chat_id,
