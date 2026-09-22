@@ -195,21 +195,22 @@ TOOLS = [
         "function": {
             "name": "call_coder",
             "description": (
-                "Delegate programming and software-engineering work to the "
-                "dedicated coding specialist. IMPORTANT: If the user's request "
-                "involves writing, modifying, debugging, analyzing, explaining, "
-                "reviewing, refactoring, optimizing, or designing code or a "
-                "software system, prefer calling this tool rather than solving "
-                "the coding task yourself. This includes code errors, stack "
-                "traces, compiler/build errors, runtime errors, API integration, "
-                "architecture, algorithms, implementation details, performance "
-                "problems, configuration issues, and code-related technical "
-                "questions. The task does NOT need to be difficult or complex "
-                "to justify delegation. Call the coder whenever the core of the "
-                "user's request is a programming or software-engineering problem. "
-                "Do not call it for purely conceptual questions unrelated to "
-                "implementing or debugging software, or for ordinary non-technical "
-                "requests."
+                "Delegate programming and software-engineering work to the dedicated "
+                "coding specialist. Call this tool whenever the core of the user's "
+                "request involves writing, modifying, debugging, analyzing, explaining, "
+                "reviewing, refactoring, optimizing, or designing code or a software "
+                "system. This includes implementation details, bugs, stack traces, "
+                "compiler/build errors, runtime errors, API integration, architecture, "
+                "algorithms, performance, configuration, and related technical work. "
+                "The task does not need to be complex to justify delegation. "
+                "\n\n"
+                "The coding specialist already receives the parent's full working "
+                "conversation and tool results. Do not use the tool arguments to repeat "
+                "that information. `task` should contain the concise objective, while "
+                "`context` should contain only a short parent-to-coder handoff such as "
+                "the intended approach, important constraints, or execution plan. "
+                "Prefer a one-line task and a brief 1–5 sentence handoff over a detailed "
+                "summary."
             ),
             "parameters": {
                 "type": "object",
@@ -217,20 +218,27 @@ TOOLS = [
                     "task": {
                         "type": "string",
                         "description": (
-                            "The exact programming or software-engineering task "
-                            "the coding specialist should solve. State what needs "
-                            "to be implemented, debugged, analyzed, changed, or "
-                            "explained and what the expected result is."
+                            "A concise statement of the exact task the coding specialist must "
+                            "perform. Prefer a direct one-line objective. Do not include a "
+                            "summary of the conversation or repeat information already visible "
+                            "to the specialist."
                         ),
                     },
                     "context": {
                         "type": "string",
                         "description": (
-                            "All relevant technical context available to the "
-                            "specialist, including source code, error messages, "
-                            "stack traces, logs, environment details, APIs, "
-                            "requirements, constraints, attempted solutions, "
-                            "and relevant previous discussion."
+                            "A concise delegation brief for the coding specialist. "
+                            "The specialist already receives the parent assistant's conversation, "
+                            "including relevant user messages, previous discussion, tool calls, "
+                            "tool results, source code, logs, and other available context. "
+                            "Do NOT repeat or summarize that inherited context. "
+                            "Instead, provide only the parent's handoff: the intended approach, "
+                            "key constraints, important interpretation, or a short execution plan "
+                            "that helps the specialist understand what the parent wants done. "
+                            "Keep this concise, typically 1–5 sentences. "
+                            "Do not reproduce source code, logs, stack traces, tool results, or "
+                            "conversation history unless a specific detail is genuinely absent "
+                            "from the inherited context."
                         ),
                     },
                 },
