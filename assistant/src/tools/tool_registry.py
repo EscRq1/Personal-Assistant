@@ -195,22 +195,15 @@ TOOLS = [
         "function": {
             "name": "call_coder",
             "description": (
-                "Delegate programming and software-engineering work to the dedicated "
-                "coding specialist. Call this tool whenever the core of the user's "
-                "request involves writing, modifying, debugging, analyzing, explaining, "
-                "reviewing, refactoring, optimizing, or designing code or a software "
-                "system. This includes implementation details, bugs, stack traces, "
-                "compiler/build errors, runtime errors, API integration, architecture, "
-                "algorithms, performance, configuration, and related technical work. "
-                "The task does not need to be complex to justify delegation. "
-                "\n\n"
-                "The coding specialist already receives the parent's full working "
-                "conversation and tool results. Do not use the tool arguments to repeat "
-                "that information. `task` should contain the concise objective, while "
-                "`context` should contain only a short parent-to-coder handoff such as "
-                "the intended approach, important constraints, or execution plan. "
-                "Prefer a one-line task and a brief 1–5 sentence handoff over a detailed "
-                "summary."
+                "Delegate a coding or technical task to the coding specialist. "
+                "The coder receives the parent assistant's existing conversation context, "
+                "including relevant user messages, previous discussion, tool calls, "
+                "tool results, source code, and logs. "
+                "Do not use the delegation fields to repeat information the coder can already see. "
+                "The parent assistant should provide the exact task and only any additional "
+                "handoff guidance that is genuinely useful. "
+                "The coder can use its available tools to retrieve additional context "
+                "when the inherited context is insufficient."
             ),
             "parameters": {
                 "type": "object",
@@ -218,31 +211,32 @@ TOOLS = [
                     "task": {
                         "type": "string",
                         "description": (
-                            "A concise statement of the exact task the coding specialist must "
-                            "perform. Prefer a direct one-line objective. Do not include a "
-                            "summary of the conversation or repeat information already visible "
-                            "to the specialist."
+                            "A concise statement of the exact task the coding specialist "
+                            "must perform."
                         ),
                     },
                     "context": {
                         "type": "string",
                         "description": (
-                            "A concise delegation brief for the coding specialist. "
-                            "The specialist already receives the parent assistant's conversation, "
-                            "including relevant user messages, previous discussion, tool calls, "
-                            "tool results, source code, logs, and other available context. "
-                            "Do NOT repeat or summarize that inherited context. "
-                            "Instead, provide only the parent's handoff: the intended approach, "
-                            "key constraints, important interpretation, or a short execution plan "
-                            "that helps the specialist understand what the parent wants done. "
-                            "Keep this concise, typically 1–5 sentences. "
-                            "Do not reproduce source code, logs, stack traces, tool results, or "
-                            "conversation history unless a specific detail is genuinely absent "
-                            "from the inherited context."
+                            "A concise handoff with only additional context the coder needs "
+                            "to understand or execute the task. "
+                            "Do not paraphrase or repeat the user's request, source code, logs, "
+                            "conversation history, or tool results—the coder can already see them. "
+                            "Do not manually include tool results in this field; tool calls and "
+                            "their results are already available to the coder. "
+                            "If the inherited context is insufficient, the coder can use the "
+                            "available tools to retrieve additional context. "
+                            "Use this field only for important interpretation, constraints, "
+                            "decisions, or guidance that is not already available to the coder. "
+                            "Leave empty when no additional context is needed."
                         ),
                     },
                 },
-                "required": ["task"],
+                "required": [
+                    "task",
+                    "context",
+                ],
+                "additionalProperties": False,
             },
         },
     },
