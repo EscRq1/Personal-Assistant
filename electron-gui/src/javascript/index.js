@@ -509,7 +509,7 @@ function createMissingImageLabel(imageName) {
    whole script fail to parse. */
 
 const STORED_IMAGE_TAG_RE =
-    /!?\[(?:(?:image\vert{}img\vert{}pic\vert{}photo)\s*[:=]?\s*([^\]\r\n]+?)|([^\]\r\n]+\.(?:png|jpe?g|webp|gif|bmp)))\s*\]/gi;
+    /!?\[(?:(?:image|img|pic|photo)\s*[:=]?\s*([^\]\r\n]+?)|([^\]\r\n]+\.(?:png|jpe?g|webp|gif|bmp)))\s*\]/gi;
 
 function appendStoredMessage(output, role, content = "", shouldScroll = true) {
     if (role !== "user") return appendMessage(output, role, content, shouldScroll);
@@ -1276,25 +1276,35 @@ function updateActiveTurn() {
         return;
     }
 
-    let bestIdx = -1;
-    let bestRatio = -1;
-
-    for (const [idx, ratio] of visibleTurns) {
-        if (ratio > bestRatio) {
-            bestRatio = ratio;
-            bestIdx = idx;
-        }
-    }
-
-    if (bestIdx === -1) {
+    if (visibleTurns.size === 0) {
+        // Fallback: no IO data yet — pick the last bubble whose top is
+        // above the 35% reference line (your original fallback logic).
         const rootRect = turnScrollRoot.getBoundingClientRect();
         const referenceY = rootRect.top + Math.min(rootRect.height * 0.35, 220);
 
-        bestIdx = 0;
+        let bestIdx = 0;
         for (let i = 0; i < turnBars.length; i++) {
             if (turnBars[i].bubble.getBoundingClientRect().top <= referenceY) bestIdx = i;
             else break;
         }
+        setActiveTurn(bestIdx);
+        return;
+    }
+
+    // Pick the turn whose vertical center is closest to the viewport center.
+    const rootRect = turnScrollRoot.getBoundingClientRect();
+    const viewportCenter = rootRect.top + rootRect.height / 2;
+
+    let bestIdx  = -1;
+    let bestDist = Infinity;
+
+    for (const [idx] of visibleTurns) {
+        const tb = turnBars[idx];
+        if (!tb) continue;
+        const rect = tb.bubble.getBoundingClientRect();
+        const bubbleCenter = rect.top + rect.height / 2;
+        const dist = Math.abs(bubbleCenter - viewportCenter);
+        if (dist < bestDist) { bestDist = dist; bestIdx = idx; }
     }
 
     setActiveTurn(bestIdx);
