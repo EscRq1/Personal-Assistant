@@ -542,7 +542,7 @@ def clear_current_chat() -> None:
     current_chat_index.clear()
 
 
-def search_current_chat(request: str, tokens: int) -> str:
+def search_current_chat(request: str, tokens: int = 10000) -> str:
     """
     Model-facing tool implementation.
 
