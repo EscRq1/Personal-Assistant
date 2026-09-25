@@ -1389,6 +1389,7 @@ class Controller:
     def memory_call(
         self,
         request: str,
+        max_memory_tokens: int = 10000
     ) -> str:
         """
         Explicit long-term memory retrieval.
@@ -1497,9 +1498,8 @@ class Controller:
                 "Select relevant historical memory candidates. "
                 "Return only valid JSON."
             ),
-            max_tokens=1024,
         )
-
+        print(f"{Fore.LIGHTRED_EX}[DEBUG]Raw selection: {raw_selection}")
         if ctx and ctx.cancel_event.is_set():
             return json.dumps({
                 "error": "Request cancelled."
@@ -1588,13 +1588,12 @@ class Controller:
         # 5. Final context budget
         # ========================================================
 
-        MAX_MEMORY_CHARS = 12000
 
         output = []
-        total_chars = 0
+        total_tokens = 0
 
         for candidate in selected:
-            remaining = MAX_MEMORY_CHARS - total_chars
+            remaining = max_memory_tokens - total_tokens
 
             if remaining <= 0:
                 break
@@ -1604,7 +1603,7 @@ class Controller:
             )
 
             clipped = text[:remaining]
-            total_chars += len(clipped)
+            total_tokens += estimate_tokens(clipped)
 
             output.append({
                 "chat_id": candidate.get(

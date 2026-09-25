@@ -34,19 +34,32 @@ TOOLS = [
                 "Search previous conversations and persistent user memory for "
                 "information that is NOT already available in the current conversation "
                 "or provided context.\n\n"
+
                 "Use this tool ONLY when the information needed to answer the user's "
                 "request is missing, incomplete, ambiguous, or insufficient in the "
                 "current context.\n\n"
+
                 "Do NOT use this tool when the required information is already present "
                 "in the current conversation, system-provided context, retrieved RAG "
                 "context, tool results, or the user's latest message.\n\n"
+
                 "Do NOT use this tool merely because the topic is personal or relates "
                 "to something the user may have discussed previously.\n\n"
+
                 "If the provided RAG context already contains the requested information, "
                 "use that information directly and do not call memory_call.\n\n"
+
                 "If the provided information is partially sufficient but an important "
-                "detail is missing, you may use memory_call specifically to retrieve "
-                "that missing detail."
+                "detail is missing, use memory_call specifically to retrieve that detail.\n\n"
+
+                "You control the maximum amount of selected historical memory returned "
+                "by choosing max_memory_tokens. Choose the smallest budget that is likely "
+                "to contain enough information. Use a small budget for a specific fact "
+                "or decision, a medium budget for broader discussion or technical context, "
+                "and a large budget when full implementation details, long code, or "
+                "multiple historical turns may be needed. If the result is insufficient "
+                "or truncated, call memory_call again with a larger budget or a more "
+                "specific request."
             ),
             "parameters": {
                 "type": "object",
@@ -58,9 +71,23 @@ TOOLS = [
                             "Ask only for information that is not already available in "
                             "the current context."
                         )
+                    },
+                    "max_memory_tokens": {
+                        "type": "integer",
+                        "description": (
+                            "Maximum token budget for the selected historical memory "
+                            "returned by this tool. Choose based on how much historical "
+                            "detail is needed. Smaller values are appropriate for specific "
+                            "facts or decisions; larger values are appropriate for long "
+                            "technical discussions, source code, or several relevant turns."
+                        ),
+                        "minimum": 500,
+                        "maximum": 50000,
+                        "default": 10000
                     }
                 },
-                "required": ["request"]
+                "required": ["request"],
+                "additionalProperties": False
             }
         }
     },
@@ -276,10 +303,11 @@ TOOLS = [
                             "Choose the budget based on how much context you expect to need."
                         ),
                         "minimum": 500,
-                        "maximum": 30000
+                        "maximum": 30000,
+                        "default": 10000,
                     }
                 },
-                "required": ["request", "tokens"],
+                "required": ["request"],
             }
         }
     },
