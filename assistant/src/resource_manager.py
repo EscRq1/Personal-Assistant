@@ -97,17 +97,42 @@ class ResourceManager:
         return None
 
     def _is_loaded(self, model_name: str) -> bool:
-        info = self._get_model_info(model_name)
+        
+        def getStatus():
 
-        if not info:
+            info = self._get_model_info(model_name)
+
+            if not info:
+                return False
+            status = info.get("status")
+
+            if isinstance(status, dict):
+                status = status.get("value")
+
+            return status
+        status = getStatus()
+        if status not in ["loaded","loading"]:
             return False
+        elif status == "loading":
+            deadline = time.monotonic() + self.request_timeout
 
-        status = info.get("status")
+            
 
-        if isinstance(status, dict):
-            status = status.get("value")
+            while time.monotonic() < deadline:
+                status = getStatus()
+                if status == "loaded":
+                    return True
 
-        return status == "loaded"
+                if status != "loading":
+                    return False
+
+                time.sleep(0.5)
+
+            raise TimeoutError(
+                f"Timed out waiting for {model_name} to load"
+            )
+
+        return True
 
     def _unload_llama_model(self, model_name: str) -> None:
         print(
