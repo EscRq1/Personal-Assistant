@@ -1591,54 +1591,44 @@ class Controller:
 
         output = []
         total_tokens = 0
+        truncated = False
 
         for candidate in selected:
-            remaining = max_memory_tokens - total_tokens
+            remaining_tokens = max_memory_tokens - total_tokens
 
-            if remaining <= 0:
+            if remaining_tokens <= 0:
+                truncated = True
                 break
 
-            text = str(
-                candidate.get("text") or ""
-            )
+            text = str(candidate.get("text") or "")
+            text_tokens = estimate_tokens(text)
 
-            clipped = text[:remaining]
-            total_tokens += estimate_tokens(clipped)
+            was_clipped = False
+
+            if text_tokens <= remaining_tokens:
+                clipped = text
+            else:
+                ratio = remaining_tokens / max(text_tokens, 1)
+                clipped = text[:max(1, int(len(text) * ratio))]
+                was_clipped = True
+                truncated = True
+
+            used_tokens = estimate_tokens(clipped)
+            total_tokens += used_tokens
 
             output.append({
-                "chat_id": candidate.get(
-                    "chat_id",
-                    "",
-                ),
-                "turn_index": candidate.get(
-                    "turn_index"
-                ),
-                "title": candidate.get(
-                    "title",
-                    "",
-                ),
-                "timestamp": candidate.get(
-                    "timestamp",
-                    "",
-                ),
+                "chat_id": candidate.get("chat_id", ""),
+                "turn_index": candidate.get("turn_index"),
+                "title": candidate.get("title", ""),
+                "timestamp": candidate.get("timestamp", ""),
                 "text": clipped,
+                "truncated": was_clipped,
             })
 
-        print(
-            f"{Fore.GREEN}"
-            f"[MEMORY TOOL] selected {len(output)} memories "
-            f"(mode={selection_mode})"
-        )
-
-        return json.dumps(
-            {
-                "query": request,
-                "found": bool(output),
-                "selection_mode": selection_mode,
-                "memories": output,
-            },
-            ensure_ascii=False,
-        )
+            # The clipped candidate consumed the remaining budget,
+            # so nothing useful can be added after it.
+            if was_clipped:
+                break
 
 
 

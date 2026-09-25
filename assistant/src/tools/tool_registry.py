@@ -82,7 +82,7 @@ TOOLS = [
                             "technical discussions, source code, or several relevant turns."
                         ),
                         "minimum": 500,
-                        "maximum": 50000,
+                        "maximum": 30000,
                         "default": 10000
                     }
                 },
