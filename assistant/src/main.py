@@ -11,6 +11,9 @@ from datetime import datetime
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, UploadFile
+from starlette.exceptions import HTTPException
+from starlette.requests import ClientDisconnect
+import logging
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import (
     StreamingResponse,
@@ -25,6 +28,10 @@ from tools.current_chat_search import set_current_chat, clear_current_chat
 from tools.estimate_tokens import estimate_tokens
 
 from pathlib import Path
+from sandbox_uploads import (
+    AskBodyLimitMiddleware, UploadError, collect_uploads, parse_upload_form,
+    form_text, import_uploads, attachment_query, validate_draft_id,
+)
 
 from sandbox_tools import (
     bind_saved_chat,
@@ -51,6 +58,7 @@ async def lifespan(app: FastAPI):
     # Shutdown logic could go here later if needed.
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(AskBodyLimitMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -153,6 +161,7 @@ class Main:
         self.notebook = memory_manager.assistant_notebook
 
         self.sandbox_context_id = "unsaved:" + uuid.uuid4().hex
+        self.frontend_draft_id = None
 
         self.api_loop = None
 
@@ -269,6 +278,7 @@ class Main:
         self.chat_initialized = False
         self.current_turn = 0
         self.sandbox_context_id = "unsaved:" + uuid.uuid4().hex
+        self.frontend_draft_id = None
 
     async def import_sandbox_files(
         self,
@@ -1429,10 +1439,56 @@ def parse_reasoning_budget(value):
 
 @app.post("/ask")
 async def ask(request: Request):
-    #Execution context like flags, thinking modes, etc
     ctx = ExecutionContext()
+    ctx.upload_form = None
     assistant.api_loop = asyncio.get_running_loop()
+    # Reserve before reading uploads: /stop and chat navigation must see this
+    # request during parsing/import, not only after inference has started.
+    with assistant.generation_lock:
+        if assistant.compaction_active:
+            return JSONResponse({"error": "Memory compaction is in progress. Retry after it finishes."}, status_code=409)
+        if assistant.generation_context is not None:
+            return JSONResponse({"error": "Another generation or upload is already running."}, status_code=409)
+        ctx.generation_done.clear()
+        assistant.generation_context = ctx
 
+    handed_to_stream = False
+    try:
+        response = await _ask_reserved(request, ctx)
+        # Finish awaited upload cleanup before handing ownership to the stream.
+        # Cancellation here must still release the preparation admission slot.
+        if ctx.upload_form is not None:
+            await ctx.upload_form.close()
+            ctx.upload_form = None
+        handed_to_stream = isinstance(response, StreamingResponse)
+        return response
+    except UploadError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=exc.status_code)
+    except json.JSONDecodeError:
+        return JSONResponse({"error": "Invalid JSON request."}, status_code=400)
+    except HTTPException as exc:
+        return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code)
+    except (ClientDisconnect, asyncio.CancelledError):
+        ctx.cancel_event.set()
+        raise
+    except Exception:
+        logging.getLogger(__name__).exception("Request/upload preparation failed")
+        return JSONResponse({"error": "Could not prepare attachments or the sandbox. Check backend logs."}, status_code=503)
+    finally:
+        try:
+            if ctx.upload_form is not None:
+                await ctx.upload_form.close()
+        finally:
+            if not handed_to_stream:
+                ctx.cancel_event.set()
+                ctx.generation_done.set()
+                with assistant.generation_lock:
+                    if assistant.generation_context is ctx:
+                        assistant.generation_context = None
+                assistant._ensure_compaction_task()
+
+
+async def _ask_reserved(request: Request, ctx):
     # ------------------------------------------------------------
     # 1. Normalize Request input
     # ------------------------------------------------------------
@@ -1441,21 +1497,19 @@ async def ask(request: Request):
     is_multipart = content_type.startswith("multipart/form-data")
 
     if is_multipart:
-        form = await request.form()
+        form = await parse_upload_form(request, ctx.cancel_event)
+        ctx.upload_form = form
+        uploads = collect_uploads(form)
+        draft_id = validate_draft_id(form_text(form, "draft_id"))
 
-        query = form.get(
-            "query",
-            "",
-        )
+        query = form_text(form, "query")
 
         raw_search = form.get(
             "websearch",
             "false",
         )
 
-        chat_id = form.get(
-            "chat_id"
-        )
+        chat_id = form_text(form, "chat_id") or None
 
         ctx.assistant_thinking_mode = form.get(
             "m-assist",
@@ -1475,15 +1529,14 @@ async def ask(request: Request):
             form.get("b-coder", "")
         )
 
-        files = form.getlist("image")
-
-        images = [
-            await img.read()
-            for img in files
-        ]
+        images = None
 
     else:
         data = await request.json()
+        if not isinstance(data, dict):
+            raise UploadError("Request JSON must be an object.")
+        uploads = []
+        draft_id = validate_draft_id(data.get("draft_id"))
 
         query = data.get(
             "query",
@@ -1521,28 +1574,12 @@ async def ask(request: Request):
 
     print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
 
-    # Reserve the singleton backend before loading/switching chats.
-    #
-    # Generation and memory compaction are mutually exclusive because both
-    # use the same llama-router with models-max=1. During compaction we do not
-    # queue a new /ask; the client must retry after Observer releases the backend.
-    with assistant.generation_lock:
-        if assistant.compaction_active:
-            return JSONResponse(
-                content={
-                    "error": "Memory compaction is in progress. Retry after it finishes."
-                },
-                status_code=409,
-            )
-
-        if assistant.generation_context is not None:
-            return JSONResponse(
-                content={"error": "Another generation is already running."},
-                status_code=409,
-            )
-
-        ctx.generation_done.clear()
-        assistant.generation_context = ctx
+    if not isinstance(query, str) or (chat_id is not None and not isinstance(chat_id, str)):
+        raise UploadError("query and chat_id must be text.")
+    if not query.strip() and not uploads:
+        raise UploadError("Enter a message or attach a file.")
+    if ctx.cancel_event.is_set():
+        raise UploadError("Request cancelled.", 409)
 
     # ------------------------------------------------------------
     # 2. Resolve chat identity
@@ -1639,17 +1676,31 @@ async def ask(request: Request):
                     status_code=500,
                 )
 
-    elif not assistant.chat_initialized:
+    elif not assistant.chat_initialized or (
+        draft_id is not None and draft_id != assistant.frontend_draft_id
+    ):
         # No chat_id means a fresh unsaved conversation. This does not happen
         # merely because compaction cleared the live raw buffer.
         assistant.reset_chat_state()
         assistant.chat_initialized = True
+
+    if not chat_id and draft_id:
+        assistant.frontend_draft_id = draft_id
 
     # Resolve the sandbox identity only after chat restoration/reset.
     # reset_chat_state() creates a new unsaved sandbox context, so assigning
     # this earlier would make the first turn use a stale workspace ID.
     ctx.chat_id = chat_id or assistant.current_chat_id
     ctx.sandbox_context_id = ctx.chat_id or assistant.sandbox_context_id
+
+    imported = await import_uploads(
+        uploads, ctx.sandbox_context_id, ctx.cancel_event, get_sandbox_manager,
+    )
+    if ctx.cancel_event.is_set():
+        raise UploadError("Request cancelled. Files already copied remain in the sandbox.", 409)
+    images = imported.images or None
+    query = attachment_query(query, imported.files)
+
 
     # 3. Create generation request. The session slot was reserved before
     # chat restoration above.
@@ -1669,12 +1720,20 @@ async def ask(request: Request):
     # 4. Flask-compatible detached generation bridge
     # ------------------------------------------------------------
 
-    async_generator = assistant.process_query(
-        query,
-        search,
-        images=images,
-        ctx=ctx,
-    )
+    async def generation_with_uploads():
+        # Run the upload notice through the existing generation bridge too.
+        # Its completion callback then owns cleanup even if the client stops
+        # immediately after receiving the attachment receipt.
+        stream = assistant.process_query(query, search, images=images, ctx=ctx)
+        try:
+            if imported.files:
+                yield {"sandbox_files": imported.files}
+            async for token in stream:
+                yield token
+        finally:
+            await stream.aclose()
+
+    async_generator = generation_with_uploads()
 
     def on_generation_finished(finished_ctx):
         should_start_compaction = False
@@ -1700,7 +1759,10 @@ async def ask(request: Request):
                 if ctx.cancel_event.is_set():
                     return
 
-                yield sse_token(token)
+                if isinstance(token, dict) and "sandbox_files" in token:
+                    yield "data: " + json.dumps(token) + "\n\n"
+                else:
+                    yield sse_token(token)
 
         except GeneratorExit:
             print("[Server] Client disconnected")
