@@ -31,7 +31,7 @@ from tools.estimate_tokens import estimate_tokens
 
 from sandbox_tools import sandbox_exec as execute_sandbox_tool
 
-MAX_ITERATIONS = 8
+MAX_ITERATIONS = 20
 
 
 # Request-scoped context propagated through asyncio.to_thread().
@@ -400,7 +400,6 @@ class Controller:
             })
 
         # Prevent an accidental infinite tool loop.
-        MAX_ITERATIONS = 8
 
         # ========================================================
         # AGENT LOOP
