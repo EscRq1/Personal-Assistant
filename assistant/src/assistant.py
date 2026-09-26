@@ -29,6 +29,7 @@ from memory_manager import memory_manager
 from llama_server_manager import LlamaRouterManager
 from tools.estimate_tokens import estimate_tokens
 
+from sandbox_tools import sandbox_exec as execute_sandbox_tool
 
 MAX_ITERATIONS = 8
 
@@ -95,6 +96,8 @@ class Controller:
             "get_chat_turn",
             get_chat_turn
         )
+
+        register_tool("sandbox_exec", self.sandbox_exec)
         
 
         register_control_tool("call_coder")
@@ -1630,6 +1633,13 @@ class Controller:
             if was_clipped:
                 break
 
+    def sandbox_exec(self, **args):
+        """Execute a command in the request's isolated sandbox workspace."""
+        return execute_sandbox_tool(
+            args,
+            _execution_context.get(),
+        )
+
 
 
 class ToolController:
@@ -2140,6 +2150,8 @@ class ExecutionContext:
         self.generation_done = threading.Event()
         self.generation_done.set()
         self.chat_id = None
+        self.sandbox_context_id = None
+
 
         self.llm_phase = ""
 
@@ -2155,6 +2167,8 @@ class ExecutionContext:
         self.assistant_thinking_budget = None
         self.coder_thinking_mode = ""
         self.coder_thinking_budget = None
+
+        
 
 
     def begin_llm(self):
