@@ -8,6 +8,7 @@ import time
 import asyncio
 from queue import Queue
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,7 +24,33 @@ from memory_manager import memory_manager, ALLOWED_PROFILE_FIELDS
 from tools.current_chat_search import set_current_chat, clear_current_chat
 from tools.estimate_tokens import estimate_tokens
 
-app = FastAPI()
+from pathlib import Path
+
+from sandbox_tools import (
+    bind_saved_chat,
+    get_manager as get_sandbox_manager,
+)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    manager = get_sandbox_manager()
+
+    removed = await asyncio.to_thread(
+        manager.reconcile
+    )
+
+    if removed:
+        print(
+            f"{Fore.YELLOW}[Sandbox] Reconciled "
+            f"{len(removed)} stale execution container(s)."
+        )
+
+    yield
+
+    # Shutdown logic could go here later if needed.
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -124,6 +151,8 @@ class Main:
         self.generation_context = None
 
         self.notebook = memory_manager.assistant_notebook
+
+        self.sandbox_context_id = "unsaved:" + uuid.uuid4().hex
 
         self.api_loop = None
 
@@ -239,6 +268,38 @@ class Main:
         self.summary = ""
         self.chat_initialized = False
         self.current_turn = 0
+        self.sandbox_context_id = "unsaved:" + uuid.uuid4().hex
+
+    async def import_sandbox_files(
+        self,
+        approved_paths: list[Path],
+    ) -> list[str]:
+        """Copy backend-approved files into this chat's sandbox workspace.
+
+        This is a trusted-backend API only. Model tool arguments must never be
+        converted into host paths and passed here.
+        """
+        if not approved_paths:
+            return []
+
+        with self.generation_lock:
+        # Importing files reserves this unsaved conversation identity.
+        # The first /ask must reuse the same sandbox workspace.
+            self.chat_initialized = True
+
+            context_id = (
+                self.current_chat_id
+                or self.sandbox_context_id
+            )
+
+        paths = [Path(path) for path in approved_paths]
+
+        def import_copies() -> list[str]:
+            manager = get_sandbox_manager()
+            session = manager.get_or_create_for_context(context_id)
+            return manager.import_files(session, paths)
+
+        return await asyncio.to_thread(import_copies)
 
     def rollover_short_term_memory(self):
         """Archive the complete live block and start a fresh live block."""
@@ -1194,6 +1255,7 @@ class Main:
 assistant = Main()
 
 
+
 def parse_bool(value) -> bool:
     if isinstance(value, bool):
         return value
@@ -1480,7 +1542,6 @@ async def ask(request: Request):
             )
 
         ctx.generation_done.clear()
-        ctx.chat_id = chat_id or assistant.current_chat_id
         assistant.generation_context = ctx
 
     # ------------------------------------------------------------
@@ -1583,6 +1644,12 @@ async def ask(request: Request):
         # merely because compaction cleared the live raw buffer.
         assistant.reset_chat_state()
         assistant.chat_initialized = True
+
+    # Resolve the sandbox identity only after chat restoration/reset.
+    # reset_chat_state() creates a new unsaved sandbox context, so assigning
+    # this earlier would make the first turn use a stale workspace ID.
+    ctx.chat_id = chat_id or assistant.current_chat_id
+    ctx.sandbox_context_id = ctx.chat_id or assistant.sandbox_context_id
 
     # 3. Create generation request. The session slot was reserved before
     # chat restoration above.
@@ -1839,6 +1906,11 @@ def persist_session(chat_id=None):
                 metadata,
             )
 
+        previous_sandbox_context = (
+            assistant.current_chat_id
+            or assistant.sandbox_context_id
+        )
+        bind_saved_chat(previous_sandbox_context, saved_id)
         assistant.current_chat_id = saved_id
 
         return {
