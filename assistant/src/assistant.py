@@ -2150,7 +2150,9 @@ class ExecutionContext:
         self.generation_done = threading.Event()
         self.generation_done.set()
         self.chat_id = None
+        
         self.sandbox_context_id = None
+        self.upload_form = None
 
 
         self.llm_phase = ""

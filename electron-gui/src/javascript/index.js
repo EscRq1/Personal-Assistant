@@ -37,10 +37,11 @@ let pendingAssistantRender = null;
 let isCollapsed = true;
 let isHistory = false;
 let currentChatId = null;
+let currentDraftId = crypto.randomUUID();
 let saveInFlight = null;
 let isSaving = false;
 let isSearching = false;
-let pendingImages = [];
+let pendingAttachments = [];
 let menuOpen = false;
 let stickToBottom = true;
 
@@ -426,6 +427,7 @@ function resetChat() {
 
     isHistory = false;
     currentChatId = null;
+    currentDraftId = crypto.randomUUID();
     refreshTurnMapNow();
 }
 
@@ -515,8 +517,17 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
     if (role !== "user") return appendMessage(output, role, content, shouldScroll);
 
     const imageNames = [];
+    const attachedFiles = [];
+    const withoutFiles = String(content).replace(/\[SANDBOX_FILES: ([^\r\n]+)\]/g, (tag, data) => {
+        try {
+            const files = JSON.parse(data);
+            if (!Array.isArray(files)) return tag;
+            attachedFiles.push(...files.filter(file => file && typeof file.name === "string"));
+            return "";
+        } catch { return tag; }
+    });
 
-    const remainingText = String(content).replace(
+    const remainingText = withoutFiles.replace(
         STORED_IMAGE_TAG_RE,
         (match, namedName, fileOnlyName) => {
             const imageName = (namedName || fileOnlyName || "").trim();
@@ -526,7 +537,7 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
         }
     );
 
-    if (!imageNames.length) return appendMessage(output, role, content, shouldScroll);
+    if (!imageNames.length && !attachedFiles.length) return appendMessage(output, role, content, shouldScroll);
 
     const message = document.createElement("div");
     message.className = "msg user";
@@ -554,6 +565,7 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
     }
 
     text.appendChild(imageList);
+    for (const file of attachedFiles) text.appendChild(createFileCard(file));
 
     const cleanText = remainingText.trim();
 
@@ -624,7 +636,7 @@ function clearInputUI() {
 
     attachmentTray.replaceChildren();
     imgInput.value = "";
-    pendingImages = [];
+    pendingAttachments = [];
 }
 
 function setGenerationUI(active) {
@@ -676,6 +688,10 @@ function appendLiveUserTurn(output, query, files, shouldScroll = true) {
         imageList.className = "image-list";
 
         for (const file of files) {
+            if (!isPreviewImage(file)) {
+                imageList.appendChild(createFileCard(file));
+                continue;
+            }
             const url = URL.createObjectURL(file);
             const img = document.createElement("img");
             img.className = "message-image";
@@ -715,23 +731,26 @@ async function sendMessage() {
     if (isBusy()) return;
 
     const query = ain.value.trim();
-    if (!query && !pendingImages.length) return;
+    if (!query && !pendingAttachments.length) return;
 
     const generationId = ++currentGenerationId;
     const controller = new AbortController();
     currentAbortController = controller;
 
-    const generationFiles = [...pendingImages];
+    const generationFiles = [...pendingAttachments];
+    const requestChatId = currentChatId;
+    const requestDraftId = currentDraftId;
+    let requestAccepted = false;
 
     setGenerationUI(true);
-    appendLiveUserTurn(outputDiv, query, generationFiles);
+    const userText = appendLiveUserTurn(outputDiv, query, generationFiles);
     clearInputUI();
 
     const loadingId = `loading-${Date.now()}-${generationId}`;
     const loading = document.createElement("div");
     loading.id = loadingId;
     loading.className = "msg assistant thinking";
-    loading.textContent = "Assistant is thinking...";
+    loading.textContent = generationFiles.length ? "Uploading attachments..." : "Assistant is thinking...";
 
     outputDiv.appendChild(loading);
     if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
@@ -748,8 +767,9 @@ async function sendMessage() {
         form.append("m-coder", modeSelectorCoder.value);
         form.append("b-coder", budgetSelectorCoder.value);
 
-        for (const image of generationFiles) form.append("image", image);
-        if (currentChatId) form.append("chat_id", currentChatId);
+        for (const file of generationFiles) form.append("file", file, file.name);
+        if (requestChatId) form.append("chat_id", requestChatId);
+        else form.append("draft_id", requestDraftId);
 
         const response = await fetch(`${API}/ask`, {
             method: "POST",
@@ -757,7 +777,11 @@ async function sendMessage() {
             signal: controller.signal
         });
 
-        if (!response.ok) throw new Error(`Server returned ${response.status}`);
+        if (!response.ok) {
+            const problem = await response.json().catch(() => ({}));
+            throw new Error(problem.error || problem.detail || `Server returned ${response.status}`);
+        }
+        requestAccepted = true;
         if (!response.body) throw new Error("Response body is not streamable");
 
         document.getElementById(loadingId)?.remove();
@@ -795,7 +819,12 @@ async function sendMessage() {
                 }
 
                 try {
-                    const token = JSON.parse(data).token;
+                    const packet = JSON.parse(data);
+                    if (Array.isArray(packet.sandbox_files)) {
+                        showUploadedFiles(userText, packet.sandbox_files);
+                        continue;
+                    }
+                    const token = packet.token;
                     if (!token) continue;
                     fullResponse += token;
                     scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
@@ -815,7 +844,9 @@ async function sendMessage() {
                 const data = finalLine.slice(6);
                 if (data !== "[DONE]") {
                     try {
-                        const token = JSON.parse(data).token;
+                        const packet = JSON.parse(data);
+                        if (Array.isArray(packet.sandbox_files)) showUploadedFiles(userText, packet.sandbox_files);
+                        const token = packet.token;
                         if (token) {
                             fullResponse += token;
                             scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
@@ -844,6 +875,13 @@ async function sendMessage() {
         }
     } catch (err) {
         flushAssistantRender();
+        if (!requestAccepted && currentChatId === requestChatId && currentDraftId === requestDraftId) {
+            // Keep selected files available after rejection/disconnection. Do not
+            // automatically resubmit: cancellation may race a completed import.
+            if (!ain.value) ain.value = query;
+            addToTray(generationFiles, true);
+            userText.closest(".msg")?.remove();
+        }
 
         if (err?.name === "AbortError" || controller.signal.aborted) {
             document.getElementById(loadingId)?.remove();
@@ -917,38 +955,95 @@ imgBtn.addEventListener("click", () => {
     imgInput.click();
 });
 
-function addToTray(files) {
+// Reuse the existing picker/tray; no HTML or stylesheet replacement required.
+imgInput.removeAttribute("accept");
+imgInput.multiple = true;
+imgBtn.title = "Attach files";
+imgBtn.setAttribute("aria-label", "Attach files");
+
+const MAX_ATTACHMENT_FILES = 20;
+const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+const MAX_ATTACHMENTS_BYTES = 128 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
+const MAX_IMAGES_BYTES = 32 * 1024 * 1024;
+const PREVIEW_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]);
+const isPreviewImage = file => PREVIEW_IMAGE_TYPES.has(file.type);
+
+function formatFileSize(size) {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function createFileCard(file) {
+    const card = document.createElement("div");
+    card.className = "sandbox-file-card";
+    const name = document.createElement("span");
+    name.className = "sandbox-file-name";
+    name.textContent = file.name || "Attached file";
+    const size = document.createElement("small");
+    size.textContent = formatFileSize(file.size || 0);
+    card.append(name, size);
+    card.title = file.path || file.name || "Attached file";
+    return card;
+}
+
+function showUploadedFiles(userText, files) {
+    let status = userText.querySelector(".sandbox-upload-status");
+    if (!status) {
+        status = document.createElement("div");
+        status.className = "sandbox-upload-status";
+        userText.appendChild(status);
+    }
+    status.textContent = `${files.length} file${files.length === 1 ? "" : "s"} added to this chat`;
+    status.title = files.map(file => file.path).join("\n");
+}
+
+function addToTray(files, restoring = false) {
+    if (!restoring && isBusy()) return;
     const picked = files ? Array.from(files) : Array.from(imgInput.files || []);
     if (!picked.length) return;
-
+    const errors = [];
+    let total = pendingAttachments.reduce((sum, file) => sum + file.size, 0);
+    let imageTotal = pendingAttachments.filter(isPreviewImage).reduce((sum, file) => sum + file.size, 0);
     for (const file of picked) {
-        if (!file.type?.startsWith("image/")) continue;
-
-        pendingImages.push(file);
-        const url = URL.createObjectURL(file);
-
+        if (pendingAttachments.includes(file)) continue;
+        if (pendingAttachments.length >= MAX_ATTACHMENT_FILES || file.size > MAX_ATTACHMENT_BYTES ||
+            total + file.size > MAX_ATTACHMENTS_BYTES ||
+            (isPreviewImage(file) && (file.size > MAX_IMAGE_BYTES || imageTotal + file.size > MAX_IMAGES_BYTES))) {
+            errors.push(file.name);
+            continue;
+        }
+        pendingAttachments.push(file);
+        total += file.size;
+        if (isPreviewImage(file)) imageTotal += file.size;
         const wrapper = document.createElement("div");
         wrapper.className = "attachment-item";
-        wrapper.dataset.objectUrl = url;
-
-        const img = document.createElement("img");
-        img.src = url;
-        img.alt = file.name || "Attached image";
-
+        wrapper.title = file.name;
+        let url = null;
+        let preview;
+        if (isPreviewImage(file)) {
+            url = URL.createObjectURL(file);
+            wrapper.dataset.objectUrl = url;
+            preview = document.createElement("img");
+            preview.src = url;
+            preview.alt = file.name || "Attached image";
+        } else {
+            wrapper.classList.add("sandbox-file-attachment");
+            preview = createFileCard(file);
+        }
         const remove = document.createElement("div");
         remove.className = "attachment-remove";
         remove.setAttribute("role", "button");
         remove.setAttribute("tabindex", "0");
         remove.setAttribute("aria-label", "Remove attachment");
         remove.textContent = "×";
-
         const removeFile = () => {
-            const index = pendingImages.indexOf(file);
-            if (index !== -1) pendingImages.splice(index, 1);
+            const index = pendingAttachments.indexOf(file);
+            if (index !== -1) pendingAttachments.splice(index, 1);
             revokeObjectURL(url);
             wrapper.remove();
         };
-
         remove.addEventListener("click", removeFile);
         remove.addEventListener("keydown", event => {
             if (event.key === "Enter" || event.key === " ") {
@@ -956,31 +1051,41 @@ function addToTray(files) {
                 removeFile();
             }
         });
-
-        wrapper.append(img, remove);
+        wrapper.append(preview, remove);
         attachmentTray.appendChild(wrapper);
     }
-
     imgInput.value = "";
+    if (errors.length) window.alert(`Could not attach: ${errors.join(", ")}. Limits: 20 files, 32 MiB per file, 128 MiB total; images 16 MiB each / 32 MiB total.`);
 }
 
 imgInput.addEventListener("change", () => addToTray());
-
 document.addEventListener("paste", event => {
     if (isBusy()) return;
-
-    const clipboard = event.clipboardData;
-    if (!clipboard) return;
-
-    const blobs = [];
-    for (const item of Array.from(clipboard.items)) {
-        if (!item.type?.startsWith("image/")) continue;
-        const blob = item.getAsFile();
-        if (blob) blobs.push(blob);
+    const files = Array.from(event.clipboardData?.items || [])
+        .filter(item => item.kind === "file").map(item => item.getAsFile()).filter(Boolean);
+    if (files.length) {
+        event.preventDefault();
+        addToTray(files);
     }
-
-    if (blobs.length) addToTray(blobs);
 });
+document.addEventListener("dragover", event => {
+    if (Array.from(event.dataTransfer?.types || []).includes("Files")) event.preventDefault();
+});
+document.addEventListener("drop", event => {
+    if (!event.dataTransfer?.files?.length) return;
+    event.preventDefault();
+    if (!isBusy()) addToTray(event.dataTransfer.files);
+});
+
+const attachmentStyle = document.createElement("style");
+attachmentStyle.textContent = `
+.sandbox-file-card { display: inline-flex; flex-direction: column; gap: 4px; padding: 10px 14px; border: 1px solid currentColor; border-radius: 10px; max-width: 240px; margin: 4px; }
+.sandbox-file-name { overflow-wrap: anywhere; font-weight: 600; }
+.sandbox-file-card small, .sandbox-upload-status { opacity: .75; font-size: .8rem; }
+.sandbox-file-attachment { width: auto !important; height: auto !important; max-width: 260px; }
+.sandbox-upload-status { margin-top: 8px; }
+`;
+document.head.appendChild(attachmentStyle);
 
 ain.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) {
