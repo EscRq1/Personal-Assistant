@@ -1,9 +1,10 @@
 from typing import Callable, Any
-from sandbox_tools import SANDBOX_EXEC_SCHEMA
+from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
 
 
 TOOLS = [
     SANDBOX_EXEC_SCHEMA,
+    SANDBOX_INSTALL_SCHEMA,
     {
         "type": "function",
         "function": {

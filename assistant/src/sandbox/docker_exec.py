@@ -44,6 +44,10 @@ class DockerExecutor:
                 "--workdir", "/workspace", "--user", f"{c.uid}:{c.gid}",
                 "--env", "HOME=/tmp", "--env", "TMPDIR=/tmp",
                 "--env", "MPLCONFIGDIR=/tmp/matplotlib", "--env", "PYTHONUNBUFFERED=1",
+                "--env", "PATH=/workspace/.venv/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "--env", "PIP_CONFIG_FILE=/dev/null", "--env", "PIP_NO_INDEX=1",
+                "--env", "PIP_FIND_LINKS=/workspace/.packages",
+                "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1", "--env", "PIP_NO_CACHE_DIR=1",
                 # Override Docker CLI proxy defaults, which can contain host credentials.
                 "--env", "HTTP_PROXY=", "--env", "HTTPS_PROXY=", "--env", "ALL_PROXY=",
                 "--env", "NO_PROXY=", "--env", "http_proxy=", "--env", "https_proxy=",

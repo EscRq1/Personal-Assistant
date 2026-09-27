@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 from .config import SandboxConfig
 
-SKIP_DIRS = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
+SKIP_DIRS = {".git", ".venv", ".packages", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
 
 
 def _copy_node(src_fd: int, name: str, destination: Path, budget: list[int],
