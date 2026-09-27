@@ -10,7 +10,7 @@ def init_command(config: SandboxConfig, imported_names: list[str] | None = None)
     script = '''
 import os, pathlib, subprocess
 root = pathlib.Path('/workspace')
-skip = {'.git', '.venv', 'venv', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', 'build', 'dist'}
+skip = {'.git', '.venv', '.packages', 'venv', 'node_modules', '__pycache__', '.pytest_cache', '.mypy_cache', 'build', 'dist'}
 extensions = {'.gguf','.safetensors','.pt','.pth','.onnx','.bin','.npy','.npz','.parquet','.arrow','.csv','.tsv','.h5','.hdf5','.zip','.tar','.gz','.xz','.7z','.pdf','.png','.jpg','.jpeg','.mp4','.so','.o','.a','.exe','.dll'}
 env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null',
            GIT_AUTHOR_NAME='sandbox', GIT_AUTHOR_EMAIL='sandbox@local',
@@ -56,4 +56,4 @@ else:
     git('commit','--allow-empty','--only','-m','sandbox imported baseline')
 '''
     script = f"IMPORTED={imported_names!r}\nMAX_FILE={config.git_max_file_bytes}\nMAX_TOTAL={config.git_max_total_bytes}\n" + script
-    return "python -I -c " + shlex.quote(script)
+    return "/usr/local/bin/python -I -c " + shlex.quote(script)

@@ -30,6 +30,7 @@ from llama_server_manager import LlamaRouterManager
 from tools.estimate_tokens import estimate_tokens
 
 from sandbox_tools import sandbox_exec as execute_sandbox_tool
+from sandbox_tools import sandbox_install as install_sandbox_packages
 
 MAX_ITERATIONS = 20
 
@@ -98,6 +99,7 @@ class Controller:
         )
 
         register_tool("sandbox_exec", self.sandbox_exec)
+        register_tool("sandbox_install", self.sandbox_install)
         
 
         register_control_tool("call_coder")
@@ -1632,6 +1634,10 @@ class Controller:
             if was_clipped:
                 break
 
+    def sandbox_install(self, **args):
+        """Called through the existing cancellable tool worker, never the event loop."""
+        return install_sandbox_packages(args, _execution_context.get())
+
     def sandbox_exec(self, **args):
         """Execute a command in the request's isolated sandbox workspace."""
         return execute_sandbox_tool(
@@ -2149,9 +2155,7 @@ class ExecutionContext:
         self.generation_done = threading.Event()
         self.generation_done.set()
         self.chat_id = None
-        
         self.sandbox_context_id = None
-        self.upload_form = None
 
 
         self.llm_phase = ""

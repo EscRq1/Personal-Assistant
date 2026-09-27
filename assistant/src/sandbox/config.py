@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,9 @@ class SandboxConfig:
     max_import_bytes: int = 512_000_000
     max_import_files: int = 20_000
     audit_enabled: bool = True
+    wheel_cache_dir: Path = field(default_factory=lambda: Path(
+        os.environ.get("SANDBOX_WHEEL_CACHE", str(Path.home() / ".assistant/sandbox-wheels"))))
+    package_install_timeout: int = 120
 
     def __post_init__(self) -> None:
         if self.uid <= 0 or self.gid <= 0:
@@ -41,13 +45,15 @@ class SandboxConfig:
         for name in ("pids_limit", "default_timeout", "max_timeout", "control_timeout",
                      "max_stdout_bytes", "max_stderr_bytes", "model_output_bytes",
                      "max_command_bytes", "git_max_file_bytes", "git_max_total_bytes",
-                     "max_import_bytes", "max_import_files"):
+                     "max_import_bytes", "max_import_files", "package_install_timeout"):
             if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be a positive integer")
         if not 0 < self.cpu_limit <= 256 or self.default_timeout > self.max_timeout:
             raise ValueError("Invalid CPU or timeout limits")
         if not self.image or self.image.startswith("-") or any(c.isspace() for c in self.image):
             raise ValueError("Invalid image reference")
+        if not isinstance(self.wheel_cache_dir, Path):
+            raise ValueError("wheel_cache_dir must be a pathlib.Path")
 
     def timeout(self, value: int | None) -> int:
         if value is None:
