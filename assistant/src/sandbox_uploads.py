@@ -13,6 +13,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from sandbox.package_cache import (
+    MAX_WHEELS,
+    MAX_WHEEL_BYTES,
+    MAX_CACHE_BYTES,
+    WHEEL_NAME,
+)
+
 from starlette.datastructures import FormData, UploadFile
 from starlette.exceptions import HTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -29,6 +36,10 @@ MAX_IMAGES_BYTES = 32 * 1024 * 1024
 CHUNK_BYTES = 256 * 1024
 VISION_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
 RESERVED_NAMES = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
+MAX_PACKAGE_BODY_BYTES = (
+    MAX_CACHE_BYTES
+    + 8 * 1024 * 1024
+)
 
 
 class UploadError(Exception):
@@ -46,41 +57,130 @@ class AskBodyLimitMiddleware:
     def __init__(self, app: ASGIApp, max_bytes: int = MAX_BODY_BYTES) -> None:
         self.app, self.max_bytes = app, max_bytes
 
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope['type'] != 'http' or scope.get('path') != '/ask':
+    async def __call__(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        path = scope.get("path", "")
+
+        if path == "/ask":
+            max_bytes = self.max_bytes
+            too_large_message = (
+                "Attachment request exceeds "
+                "the 128 MiB total limit."
+            )
+
+        elif path.startswith(
+            "/sandbox/manual-packages/"
+        ):
+            max_bytes = MAX_PACKAGE_BODY_BYTES
+            too_large_message = (
+                "Manual package upload exceeds "
+                "the package byte limit."
+            )
+
+        else:
+            await self.app(scope, receive, send)
+            return
+
         from starlette.responses import JSONResponse
-        headers = dict(scope.get('headers', []))
+
+        headers = dict(
+            scope.get("headers", [])
+        )
+
         try:
-            length = int(headers.get(b'content-length', b'0'))
+            length = int(
+                headers.get(
+                    b"content-length",
+                    b"0",
+                )
+            )
+
         except ValueError:
-            await JSONResponse({'error': 'Invalid Content-Length'}, status_code=400)(scope, receive, send)
+            await JSONResponse(
+                {"error": "Invalid Content-Length"},
+                status_code=400,
+            )(
+                scope,
+                receive,
+                send,
+            )
             return
-        if length > self.max_bytes:
-            await JSONResponse({'error': 'Attachment request exceeds the 128 MiB total limit.'}, status_code=413)(scope, receive, send)
+
+        if length > max_bytes:
+            await JSONResponse(
+                {"error": too_large_message},
+                status_code=413,
+            )(
+                scope,
+                receive,
+                send,
+            )
             return
-        received, exceeded = 0, False
-        multipart = headers.get(b'content-type', b'').lower().startswith(b'multipart/form-data')
+
+        received = 0
+        exceeded = False
+
+        multipart = (
+            headers
+            .get(b"content-type", b"")
+            .lower()
+            .startswith(b"multipart/form-data")
+        )
 
         async def bounded_receive() -> Message:
             nonlocal received, exceeded
+
             message = await receive()
-            if message['type'] == 'http.request':
-                received += len(message.get('body', b''))
-                if received > self.max_bytes:
+
+            if message["type"] == "http.request":
+                received += len(
+                    message.get("body", b"")
+                )
+
+                if received > max_bytes:
                     exceeded = True
+
                     if multipart:
-                        raise MultiPartException('Attachment request exceeds the 128 MiB total limit.')
-                    raise HTTPException(413, 'Request body is too large.')
+                        raise MultiPartException(
+                            too_large_message
+                        )
+
+                    raise HTTPException(
+                        413,
+                        too_large_message,
+                    )
+
             return message
 
-        async def bounded_send(message: Message) -> None:
-            if exceeded and message['type'] == 'http.response.start':
-                message = {**message, 'status': 413}
+        async def bounded_send(
+            message: Message,
+        ) -> None:
+            if (
+                exceeded
+                and message["type"]
+                == "http.response.start"
+            ):
+                message = {
+                    **message,
+                    "status": 413,
+                }
+
             await send(message)
 
-        await self.app(scope, bounded_receive, bounded_send)
+        await self.app(
+            scope,
+            bounded_receive,
+            bounded_send,
+        )
 
 
 async def parse_upload_form(request: Request, cancel_event: threading.Event) -> FormData:
@@ -109,7 +209,275 @@ async def parse_upload_form(request: Request, cancel_event: threading.Event) -> 
         if interrupted is not None:
             raise interrupted
         raise UploadError(str(exc), 409 if cancel_event.is_set() else 400) from exc
+async def parse_manual_package_form(
+    request: Request,
+    cancel_event: threading.Event,
+) -> FormData:
 
+    content_type = (
+        request.headers
+        .get("content-type", "")
+        .lower()
+    )
+
+    if not content_type.startswith(
+        "multipart/form-data"
+    ):
+        raise UploadError(
+            "Manual package upload must be multipart/form-data."
+        )
+
+    interrupted: BaseException | None = None
+
+    async def guarded_stream():
+        nonlocal interrupted
+
+        try:
+            async for chunk in request.stream():
+                if cancel_event.is_set():
+                    raise MultiPartException(
+                        "Package upload cancelled."
+                    )
+
+                yield chunk
+
+        except (
+            asyncio.CancelledError,
+            ClientDisconnect,
+        ) as exc:
+            interrupted = exc
+            cancel_event.set()
+
+            raise MultiPartException(
+                "Package upload interrupted."
+            ) from exc
+
+    parser = MultiPartParser(
+        request.headers,
+        guarded_stream(),
+        max_files=MAX_WHEELS,
+        max_fields=4,
+        max_part_size=64 * 1024,
+    )
+
+    try:
+        return await parser.parse()
+
+    except MultiPartException as exc:
+        if interrupted is not None:
+            raise interrupted
+
+        raise UploadError(
+            str(exc),
+            409
+            if cancel_event.is_set()
+            else 400,
+        ) from exc
+    
+def _stage_and_install_manual_wheels(
+    uploads: list[UploadFile],
+    session_id: str,
+    packages: list[str],
+    cancel_event: threading.Event,
+    manager_factory: Callable[[], Any],
+):
+    total = 0
+    names: set[str] = set()
+
+    with tempfile.TemporaryDirectory(
+        prefix="assistant-wheel-upload-"
+    ) as temporary:
+
+        stage = Path(temporary)
+
+        for upload in uploads:
+            if cancel_event.is_set():
+                raise UploadError(
+                    "Package upload cancelled.",
+                    409,
+                )
+
+            name = upload.filename
+
+            if (
+                not isinstance(name, str)
+                or not WHEEL_NAME.fullmatch(name)
+                or name in names
+            ):
+                raise UploadError(
+                    "Invalid or duplicate wheel filename."
+                )
+
+            names.add(name)
+
+            target = stage / name
+            size = 0
+
+            upload.file.seek(0)
+
+            with target.open("xb") as output:
+                while chunk := upload.file.read(
+                    CHUNK_BYTES
+                ):
+                    if cancel_event.is_set():
+                        raise UploadError(
+                            "Package upload cancelled.",
+                            409,
+                        )
+
+                    size += len(chunk)
+                    total += len(chunk)
+
+                    if (
+                        size > MAX_WHEEL_BYTES
+                        or total > MAX_CACHE_BYTES
+                    ):
+                        raise UploadError(
+                            "Manual wheel upload exceeds package limits.",
+                            413,
+                        )
+
+                    output.write(chunk)
+
+        if cancel_event.is_set():
+            raise UploadError(
+                "Package upload cancelled.",
+                409,
+            )
+
+        manager = manager_factory()
+
+        try:
+            session = manager.get_session(
+                session_id
+            )
+
+        except ValueError:
+            raise UploadError(
+                "Invalid sandbox session.",
+                404,
+            ) from None
+
+        if session is None:
+            raise UploadError(
+                "Sandbox session was not found.",
+                404,
+            )
+
+        return manager.install_manual(
+            session,
+            stage,
+            packages,
+            cancel_event=cancel_event,
+            caller="user:manual-packages",
+        )
+
+
+async def install_manual_wheels(
+    uploads: list[UploadFile],
+    session_id: str,
+    packages: list[str],
+    cancel_event: threading.Event,
+    manager_factory: Callable[[], Any],
+):
+    worker = asyncio.create_task(
+        asyncio.to_thread(
+            _stage_and_install_manual_wheels,
+            uploads,
+            session_id,
+            packages,
+            cancel_event,
+            manager_factory,
+        )
+    )
+
+    try:
+        return await asyncio.shield(worker)
+
+    except asyncio.CancelledError:
+        cancel_event.set()
+
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+
+            except asyncio.CancelledError:
+                continue
+
+            except Exception:
+                break
+
+        if not worker.cancelled():
+            worker.exception()
+
+        raise
+
+def collect_manual_wheels(
+    form: FormData,
+) -> list[UploadFile]:
+
+    wheels: list[UploadFile] = []
+    names: set[str] = set()
+
+    declared_total = 0
+
+    for field, value in form.multi_items():
+
+        if not isinstance(value, UploadFile):
+            raise UploadError(
+                "Manual package requests may contain wheel files only."
+            )
+
+        if field != "wheel":
+            raise UploadError(
+                "Manual package files must use the wheel field."
+            )
+
+        name = value.filename
+
+        if (
+            not isinstance(name, str)
+            or not name
+            or len(name.encode("utf-8")) > 255
+            or not WHEEL_NAME.fullmatch(name)
+        ):
+            raise UploadError(
+                "Manual package uploads accept .whl filenames only."
+            )
+
+        if name in names:
+            raise UploadError(
+                "Duplicate wheel filename in package upload."
+            )
+
+        names.add(name)
+
+        if value.size is not None:
+            if value.size > MAX_WHEEL_BYTES:
+                raise UploadError(
+                    "A wheel exceeds the per-wheel size limit.",
+                    413,
+                )
+
+            declared_total += value.size
+
+        wheels.append(value)
+
+    if not wheels:
+        raise UploadError(
+            "No wheel files were uploaded."
+        )
+
+    if (
+        len(wheels) > MAX_WHEELS
+        or declared_total > MAX_CACHE_BYTES
+    ):
+        raise UploadError(
+            "Manual wheel upload exceeds package limits.",
+            413,
+        )
+
+    return wheels
 
 def filename_for_upload(name: str | None) -> str:
     # Filename is a label, never a client-selected host path.

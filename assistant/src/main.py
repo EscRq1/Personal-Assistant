@@ -29,14 +29,30 @@ from tools.estimate_tokens import estimate_tokens
 
 from pathlib import Path
 from sandbox_uploads import (
-    AskBodyLimitMiddleware, UploadError, collect_uploads, parse_upload_form,
-    form_text, import_uploads, attachment_query, validate_draft_id,
+    AskBodyLimitMiddleware,
+    UploadError,
+    collect_uploads,
+    parse_upload_form,
+    form_text,
+    import_uploads,
+    attachment_query,
+    validate_draft_id,
+
+    parse_manual_package_form,
+    collect_manual_wheels,
+    install_manual_wheels,
 )
 
 from sandbox_tools import (
     bind_saved_chat,
     get_manager as get_sandbox_manager,
+
+    claim_manual_package_approval,
+    release_manual_package_approval,
+    consume_manual_package_approval,
 )
+
+from sandbox.package_cache import PackageError
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -2649,6 +2665,187 @@ def summary():
         content=assistant.summary,
         status_code=200,
     )
+
+@app.post(
+    "/sandbox/manual-packages/{session_id}"
+)
+async def manual_package_upload(
+    session_id: str,
+    request: Request,
+):
+    # Backend is already bound to loopback, but keep this endpoint
+    # explicitly local as an additional boundary.
+    client = request.client
+
+    if (
+        client is not None
+        and client.host
+        not in {"127.0.0.1", "::1"}
+    ):
+        return JSONResponse(
+            content={
+                "error": (
+                    "Manual package approval "
+                    "is local-only."
+                ),
+            },
+            status_code=403,
+        )
+
+    token = request.headers.get(
+        "x-sandbox-approval",
+        "",
+    ).strip()
+
+    packages = claim_manual_package_approval(
+        token,
+        session_id,
+    )
+
+    if packages is None:
+        return JSONResponse(
+            content={
+                "error": "invalid_package_approval",
+                "message": (
+                    "The package approval is invalid, "
+                    "expired, already in use, or belongs "
+                    "to another sandbox session."
+                ),
+            },
+            status_code=403,
+        )
+
+    claimed = True
+    form = None
+    cancel_event = threading.Event()
+
+    try:
+        form = await parse_manual_package_form(
+            request,
+            cancel_event,
+        )
+
+        wheels = collect_manual_wheels(
+            form
+        )
+
+        result = await install_manual_wheels(
+            wheels,
+            session_id,
+            packages,
+            cancel_event,
+            get_sandbox_manager,
+        )
+
+        if result.cancelled:
+            return JSONResponse(
+                content={
+                    "error": "package_upload_cancelled",
+                },
+                status_code=409,
+            )
+
+        if result.timed_out:
+            return JSONResponse(
+                content={
+                    "error": "package_install_timeout",
+                    "message": result.stderr[-8000:],
+                },
+                status_code=408,
+            )
+
+        if result.error:
+            return JSONResponse(
+                content={
+                    "error": result.error,
+                    "message": (
+                        result.stderr[-8000:]
+                        or "Sandbox package installation failed."
+                    ),
+                },
+                status_code=503,
+            )
+
+        if result.exit_code != 0:
+            return JSONResponse(
+                content={
+                    "error": "package_install_failed",
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout[-8000:],
+                    "stderr": result.stderr[-8000:],
+                },
+                status_code=400,
+            )
+
+        consume_manual_package_approval(
+            token,
+            session_id,
+        )
+
+        claimed = False
+
+        return JSONResponse(
+            content={
+                "status": "success",
+                "session_id": session_id,
+                "packages": packages,
+                "environment": "/workspace/.venv",
+                "stdout": result.stdout[-8000:],
+            },
+            status_code=200,
+        )
+
+    except UploadError as exc:
+        return JSONResponse(
+            content={
+                "error": str(exc),
+            },
+            status_code=exc.status_code,
+        )
+
+    except PackageError as exc:
+        return JSONResponse(
+            content={
+                "error": exc.code,
+                "message": str(exc),
+            },
+            status_code=400,
+        )
+
+    except (
+        ClientDisconnect,
+        asyncio.CancelledError,
+    ):
+        cancel_event.set()
+        raise
+
+    except Exception:
+        logging.getLogger(
+            __name__
+        ).exception(
+            "Manual package installation failed"
+        )
+
+        return JSONResponse(
+            content={
+                "error": "manual_package_unavailable",
+                "message": (
+                    "Manual package installation failed; "
+                    "check backend logs."
+                ),
+            },
+            status_code=503,
+        )
+
+    finally:
+        if claimed:
+            release_manual_package_approval(
+                token,
+                session_id,
+            )
+
+        if form is not None:
+            await form.close()
 
 @app.get("/debug/memory")
 def debug_memory():

@@ -166,7 +166,153 @@ def publish(wheel_directory: Path, cache: Path, image: str) -> int:
     finally:
         os.close(source_fd)
 
+def stage_manual_wheelhouse(
+    source: Path,
+    destination: Path,
+    packages: list[str],
+    event: threading.Event,
+) -> int:
+    """Validate and copy a user-approved wheelhouse into backend staging.
 
+    This never imports packages, executes package code, invokes pip, or
+    accesses the network.
+    """
+
+    requested = validate_requests(packages)
+    source = Path(os.path.abspath(source.expanduser()))
+
+    check_cancel(event)
+
+    try:
+        fd = _open_directory(source)
+    except OSError:
+        raise PackageError(
+            "invalid_manual_wheels",
+            "Manual wheel upload is unavailable or invalid.",
+        ) from None
+
+    try:
+        names = sorted(os.listdir(fd))
+
+        if (
+            not names
+            or len(names) > MAX_WHEELS
+            or any(
+                not isinstance(name, str)
+                or not WHEEL_NAME.fullmatch(name)
+                for name in names
+            )
+        ):
+            raise PackageError(
+                "invalid_manual_wheels",
+                "Manual package upload must contain 1 to 256 wheel files only.",
+            )
+
+        versions: dict[str, Version] = {}
+
+        total = 0
+        unpacked = 0
+
+        for filename in names:
+            check_cancel(event)
+
+            target = destination / filename
+            size = 0
+
+            with (
+                regular_file(
+                    fd,
+                    filename,
+                    MAX_WHEEL_BYTES,
+                ) as src,
+                target.open("xb") as dst,
+            ):
+                while chunk := src.read(256 * 1024):
+                    check_cancel(event)
+
+                    size += len(chunk)
+                    total += len(chunk)
+
+                    if (
+                        size > MAX_WHEEL_BYTES
+                        or total > MAX_CACHE_BYTES
+                    ):
+                        raise PackageError(
+                            "invalid_manual_wheels",
+                            "Manual wheel upload exceeds package size limits.",
+                        )
+
+                    dst.write(chunk)
+
+            name, version_text, expanded = _wheel_metadata(target)
+
+            canonical_name = canonicalize_name(name)
+            version = Version(version_text)
+
+            unpacked += expanded
+
+            if unpacked > MAX_UNPACKED_BYTES:
+                raise PackageError(
+                    "invalid_manual_wheels",
+                    "Combined unpacked wheel size exceeds the limit.",
+                )
+
+            if canonical_name in versions:
+                raise PackageError(
+                    "invalid_manual_wheels",
+                    "Manual upload contains multiple wheels for the same package.",
+                )
+
+            versions[canonical_name] = version
+
+        for text in requested:
+            requirement = Requirement(text)
+
+            version = versions.get(
+                canonicalize_name(requirement.name)
+            )
+
+            if (
+                version is None
+                or not requirement.specifier.contains(
+                    version,
+                    prereleases=True,
+                )
+            ):
+                raise PackageError(
+                    "manual_package_mismatch",
+                    (
+                        "Uploaded wheels do not contain the requested "
+                        "package/version."
+                    ),
+                )
+
+        return len(names)
+
+    except PackageError:
+        raise
+
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        zipfile.BadZipFile,
+    ):
+        log.warning(
+            "Manual wheel validation failed",
+            exc_info=True,
+        )
+
+        raise PackageError(
+            "invalid_manual_wheels",
+            "Uploaded wheel files failed validation.",
+        ) from None
+
+    finally:
+        os.close(fd)
+        
 @dataclass(frozen=True)
 class WheelCache:
     path: Path

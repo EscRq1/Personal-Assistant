@@ -244,6 +244,170 @@ class SandboxManager:
             with self._lock:
                 self._active_cancel.pop(session.id, None)
             lock.release()
+    def install_manual(
+        self,
+        session: SandboxSession,
+        wheel_directory: Path,
+        packages: list[str],
+        timeout: int | None = None,
+        cancel_event: threading.Event | None = None,
+        caller: str | None = None,
+    ) -> ExecutionResult:
+        """Install user-approved uploaded wheels into this session only.
+
+        The uploaded wheelhouse is validated on the host without importing or
+        executing package code. Actual installation still occurs inside the
+        networkless Docker sandbox.
+        """
+
+        from .package_cache import (
+            PackageCancelled,
+            check_cancel,
+            stage_manual_wheelhouse,
+            validate_requests,
+        )
+        from .packages import install_command
+
+        requested = validate_requests(packages)
+
+        seconds = self.config.timeout(
+            timeout
+            if timeout is not None
+            else min(
+                self.config.package_install_timeout,
+                self.config.max_timeout,
+            )
+        )
+
+        event = (
+            cancel_event
+            if cancel_event is not None
+            else threading.Event()
+        )
+
+        lock = self._session_lock(session)
+
+        while not lock.acquire(timeout=0.05):
+            if event.is_set():
+                return ExecutionResult(
+                    "",
+                    "",
+                    None,
+                    0,
+                    cancelled=True,
+                )
+
+        start = time.monotonic()
+
+        try:
+            check_cancel(event)
+
+            if session.state != SessionState.READY:
+                raise RuntimeError("Sandbox is not ready")
+
+            self.workspaces.validate(
+                session.id,
+                session.workspace,
+            )
+
+            with self._lock:
+                self._active_cancel[session.id] = event
+
+            with tempfile.TemporaryDirectory(
+                prefix="manual-packages-",
+                dir=self.workspaces.path(session.id),
+            ) as temporary:
+
+                staging = Path(temporary)
+
+                wheels = staging / "wheels"
+                wheels.mkdir(mode=0o700)
+
+                stage_manual_wheelhouse(
+                    wheel_directory,
+                    wheels,
+                    requested,
+                    event,
+                )
+
+                check_cancel(event)
+
+                target = session.workspace / ".packages"
+                previous = staging / "previous"
+
+                if os.path.lexists(target):
+                    target.rename(previous)
+
+                try:
+                    wheels.rename(target)
+
+                except BaseException:
+                    if os.path.lexists(previous):
+                        previous.rename(target)
+
+                    raise
+
+                finally:
+                    if os.path.lexists(previous):
+                        if (
+                            previous.is_dir()
+                            and not previous.is_symlink()
+                        ):
+                            remove_tree(previous)
+                        else:
+                            previous.unlink()
+
+            remaining = seconds - (
+                time.monotonic() - start
+            )
+
+            if remaining <= 0:
+                result = ExecutionResult(
+                    "",
+                    "Package staging exceeded the timeout.",
+                    None,
+                    0,
+                    timed_out=True,
+                )
+
+            else:
+                result = self.exec(
+                    session,
+                    install_command(requested),
+                    math.ceil(remaining),
+                    event,
+                    caller=(
+                        caller
+                        or "user:manual-packages"
+                    ),
+                )
+
+            result.duration_ms = int(
+                (time.monotonic() - start) * 1000
+            )
+
+            return result
+
+        except PackageCancelled:
+            return ExecutionResult(
+                "",
+                "",
+                None,
+                int(
+                    (time.monotonic() - start)
+                    * 1000
+                ),
+                cancelled=True,
+            )
+
+        finally:
+            with self._lock:
+                self._active_cancel.pop(
+                    session.id,
+                    None,
+                )
+
+            lock.release()
 
     def import_files(self, session: SandboxSession, approved_paths: list[Path]) -> list[str]:
         with self._session_lock(session):
