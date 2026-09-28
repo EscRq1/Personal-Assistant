@@ -32,7 +32,7 @@ from tools.estimate_tokens import estimate_tokens
 from sandbox_tools import sandbox_exec as execute_sandbox_tool
 from sandbox_tools import sandbox_install as install_sandbox_packages
 
-MAX_ITERATIONS = 20
+
 
 
 # Request-scoped context propagated through asyncio.to_thread().
@@ -406,6 +406,7 @@ class Controller:
         # ========================================================
         # AGENT LOOP
         # ========================================================
+        MAX_ITERATIONS = ctx.tool_calling_budget
 
         for iteration in range(MAX_ITERATIONS):
 
@@ -804,7 +805,7 @@ class Controller:
 
         # Reasoning/tool loop.
 
-
+        MAX_ITERATIONS = ctx.tool_calling_budget
         for iteration in range(MAX_ITERATIONS):
 
             content_parts = []
@@ -2172,6 +2173,7 @@ class ExecutionContext:
         self.assistant_thinking_budget = None
         self.coder_thinking_mode = ""
         self.coder_thinking_budget = None
+        self.tool_calling_budget = None
 
         
 
