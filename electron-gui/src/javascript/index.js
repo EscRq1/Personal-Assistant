@@ -751,7 +751,9 @@ async function sendMessage() {
     const loading = document.createElement("div");
     loading.id = loadingId;
     loading.className = "msg assistant thinking";
-    loading.textContent = generationFiles.length ? "Uploading attachments..." : "Assistant is thinking...";
+    loading.textContent = generationFiles.length
+        ? "Uploading attachments..."
+        : "Assistant is thinking...";
 
     outputDiv.appendChild(loading);
     if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
@@ -769,7 +771,10 @@ async function sendMessage() {
         form.append("b-coder", budgetSelectorCoder.value);
         form.append("b-tools", toolBudgetSelector.value);
 
-        for (const file of generationFiles) form.append("file", file, file.name);
+        for (const file of generationFiles) {
+            form.append("file", file, file.name);
+        }
+
         if (requestChatId) form.append("chat_id", requestChatId);
         else form.append("draft_id", requestDraftId);
 
@@ -781,13 +786,15 @@ async function sendMessage() {
 
         if (!response.ok) {
             const problem = await response.json().catch(() => ({}));
-            throw new Error(problem.error || problem.detail || `Server returned ${response.status}`);
+            throw new Error(
+                problem.error ||
+                problem.detail ||
+                `Server returned ${response.status}`
+            );
         }
+
         requestAccepted = true;
         if (!response.body) throw new Error("Response body is not streamable");
-
-        document.getElementById(loadingId)?.remove();
-        assistantTextElement = appendMessage(outputDiv, "assistant", "");
 
         let fullResponse = "";
         const reader = response.body.getReader();
@@ -795,10 +802,54 @@ async function sendMessage() {
         let buffer = "";
         let streamFinished = false;
 
+        function handleEvent(event) {
+            const line = event.trim();
+            if (!line.startsWith("data: ")) return false;
+
+            const data = line.slice(6);
+            if (data === "[DONE]") return true;
+
+            try {
+                const packet = JSON.parse(data);
+
+                if (Array.isArray(packet.sandbox_files)) {
+                    showUploadedFiles(userText, packet.sandbox_files);
+
+                    if (!assistantTextElement) {
+                        loading.textContent = "Assistant is thinking...";
+                    }
+                }
+
+                const token = packet.token;
+                if (token) {
+                    if (!assistantTextElement) {
+                        loading.remove();
+                        assistantTextElement = appendMessage(
+                            outputDiv,
+                            "assistant",
+                            ""
+                        );
+                    }
+
+                    fullResponse += token;
+                    scheduleAssistantRender(
+                        assistantTextElement,
+                        fullResponse,
+                        generationId
+                    );
+                }
+            } catch (error) {
+                console.error("Stream parsing error:", error, data);
+            }
+
+            return false;
+        }
+
         while (true) {
             if (generationId !== currentGenerationId) break;
 
             const { value, done } = await reader.read();
+
             if (done) {
                 streamFinished = true;
                 break;
@@ -809,96 +860,95 @@ async function sendMessage() {
             buffer = events.pop() ?? "";
 
             for (const event of events) {
-                const line = event.trim();
-                if (!line.startsWith("data: ")) continue;
-
-                const data = line.slice(6);
-                if (data === "[DONE]") {
+                if (handleEvent(event)) {
                     streamFinished = true;
                     buffer = "";
                     try { await reader.cancel(); } catch { }
                     break;
-                }
-
-                try {
-                    const packet = JSON.parse(data);
-                    if (Array.isArray(packet.sandbox_files)) {
-                        showUploadedFiles(userText, packet.sandbox_files);
-                        continue;
-                    }
-                    const token = packet.token;
-                    if (!token) continue;
-                    fullResponse += token;
-                    scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
-                } catch (error) {
-                    console.error("Stream parsing error:", error, data);
                 }
             }
 
             if (streamFinished) break;
         }
 
-        //Append the leftovers if the request terminated earlier
+        // Process an event that arrived without a final "\n\n".
         buffer += decoder.decode();
+
         if (generationId === currentGenerationId && buffer.trim()) {
-            const finalLine = buffer.trim();
-            if (finalLine.startsWith("data: ")) {
-                const data = finalLine.slice(6);
-                if (data !== "[DONE]") {
-                    try {
-                        const packet = JSON.parse(data);
-                        if (Array.isArray(packet.sandbox_files)) showUploadedFiles(userText, packet.sandbox_files);
-                        const token = packet.token;
-                        if (token) {
-                            fullResponse += token;
-                            scheduleAssistantRender(assistantTextElement, fullResponse, generationId);
-                        }
-                    } catch { }
-                }
+            for (const event of buffer.split("\n\n")) {
+                if (handleEvent(event)) break;
             }
         }
 
+        // Also removes it if the stream ended without producing a token.
+        loading.remove();
         finishGeneration(generationId);
 
-        if (controller.signal.aborted || generationId !== currentGenerationId || isStopping) return;
+        if (
+            controller.signal.aborted ||
+            generationId !== currentGenerationId ||
+            isStopping
+        ) {
+            return;
+        }
 
         try {
             const sumRes = await fetch(`${API}/sum`, { method: "POST" });
-            if (!sumRes.ok) throw new Error(`Summary request failed: ${sumRes.status}`);
+            if (!sumRes.ok) {
+                throw new Error(`Summary request failed: ${sumRes.status}`);
+            }
 
             const summaryBlock = await sumRes.json();
             header.innerText = summaryBlock.title || "New Chat";
             header.style.setProperty(
                 "--snippet",
-                JSON.stringify(summaryBlock.snippet || "No summary available.")
+                JSON.stringify(
+                    summaryBlock.snippet || "No summary available."
+                )
             );
         } catch (summaryError) {
             console.warn("Summary update failed:", summaryError);
         }
     } catch (err) {
         flushAssistantRender();
-        if (!requestAccepted && currentChatId === requestChatId && currentDraftId === requestDraftId) {
-            // Keep selected files available after rejection/disconnection. Do not
-            // automatically resubmit: cancellation may race a completed import.
+
+        if (
+            !requestAccepted &&
+            currentChatId === requestChatId &&
+            currentDraftId === requestDraftId
+        ) {
+            // Restore the input if the request was rejected or disconnected
+            // before the server accepted it.
             if (!ain.value) ain.value = query;
             addToTray(generationFiles, true);
             userText.closest(".msg")?.remove();
         }
 
         if (err?.name === "AbortError" || controller.signal.aborted) {
-            document.getElementById(loadingId)?.remove();
+            loading.remove();
             console.log("Generation stopped by user.");
 
-            if (generationId === currentGenerationId || generationId === stoppedGenerationId) {
+            if (
+                generationId === currentGenerationId ||
+                generationId === stoppedGenerationId
+            ) {
                 const stopped = appendMessage(outputDiv, "assistant", "");
                 stopped.classList.add("generation-stopped");
                 stopped.textContent = "Generation stopped by user";
             }
+
             return;
         }
 
-        const loadingEl = document.getElementById(loadingId);
-        if (loadingEl) loadingEl.textContent = `Error: ${err?.message || "Request failed."}`;
+        if (loading.isConnected) {
+            loading.textContent =
+                `Error: ${err?.message || "Request failed."}`;
+        } else {
+            const errorText = appendMessage(outputDiv, "assistant", "");
+            errorText.textContent =
+                `Error: ${err?.message || "Request failed."}`;
+        }
+
         console.error(err);
     } finally {
         if (generationId === currentGenerationId) {
