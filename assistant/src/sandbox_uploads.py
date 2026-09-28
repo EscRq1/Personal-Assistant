@@ -528,19 +528,47 @@ def form_text(form: FormData, key: str, default: str = '') -> str:
 @dataclass
 class ImportedBatch:
     files: list[dict[str, Any]]
-    images: list[bytes]
+    images: list[VisionUpload]
 
 @dataclass
 class VisionUpload:
     data: bytes
     mime: str
 
+def normalize_vision_upload(
+    image: VisionUpload | bytes | bytearray | memoryview,
+) -> VisionUpload:
+    """Accept upload records and legacy in-process image bytes."""
+    if isinstance(image, VisionUpload):
+        if not isinstance(image.data, bytes) or image.mime not in VISION_TYPES:
+            raise ValueError(
+                "VisionUpload requires bytes and a supported image MIME type."
+            )
+        return image
+
+    if not isinstance(image, (bytes, bytearray, memoryview)):
+        raise TypeError("Expected VisionUpload or image bytes.")
+
+    data = bytes(image)
+    # Legacy byte callers have no MIME metadata; retain JPEG as the fallback.
+    mime = "image/jpeg"
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif data.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    elif data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    elif data.startswith(b"BM"):
+        mime = "image/bmp"
+
+    return VisionUpload(data=data, mime=mime)
+
 def _stage_and_import(uploads: list[UploadFile], context_id: str,
                       cancel_event: threading.Event,
                       manager_factory: Callable[[], Any]) -> ImportedBatch:
     records: list[dict[str, Any]] = []
     paths: list[Path] = []
-    images: list[bytes] = []
+    images: list[VisionUpload] = []
     total = image_total = 0
     # All blocking disk IO, copying, and Docker/Git setup happen in this worker.
     # This directory is backend-created and never exposed to the model.

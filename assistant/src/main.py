@@ -31,6 +31,7 @@ from pathlib import Path
 from sandbox_uploads import (
     AskBodyLimitMiddleware,
     UploadError,
+    VisionUpload,
     collect_uploads,
     parse_upload_form,
     form_text,
@@ -41,6 +42,7 @@ from sandbox_uploads import (
     parse_manual_package_form,
     collect_manual_wheels,
     install_manual_wheels,
+    normalize_vision_upload,
 )
 
 from sandbox_tools import (
@@ -1023,7 +1025,7 @@ class Main:
         self,
         user_input,
         is_forced_search,
-        images=None,
+        images: list[VisionUpload | bytes] | None = None,
         ctx=None,
     ):
         if ctx is None:
@@ -1055,15 +1057,26 @@ class Main:
                 exist_ok=True,
             )
 
-            for img_bytes in images:
+            for image in images:
                 if ctx.cancel_event.is_set():
                     return
 
+                image = normalize_vision_upload(image)
+                img_bytes = image.data
+
                 images_b64.append(
-                    base64.b64encode(img_bytes).decode("utf-8")
+                    f"data:{image.mime};base64,"
+                    + base64.b64encode(img_bytes).decode("ascii")
                 )
 
-                img_id = f"{uuid.uuid4()}.png"
+                extension = {
+                    "image/png": ".png",
+                    "image/jpeg": ".jpg",
+                    "image/webp": ".webp",
+                    "image/gif": ".gif",
+                    "image/bmp": ".bmp",
+                }[image.mime]
+                img_id = f"{uuid.uuid4()}{extension}"
 
                 with open(
                     os.path.join(
