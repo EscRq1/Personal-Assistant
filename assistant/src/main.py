@@ -1545,6 +1545,10 @@ async def _ask_reserved(request: Request, ctx):
             form.get("b-coder", "")
         )
 
+        ctx.tool_calling_budget = parse_reasoning_budget(
+            form.get("b-tools", "")
+        )
+
         images = None
 
     else:
@@ -1584,6 +1588,10 @@ async def _ask_reserved(request: Request, ctx):
 
         ctx.coder_thinking_budget = parse_reasoning_budget(
             data.get("b-coder")
+        )
+
+        ctx.tool_calling_budget = parse_reasoning_budget(
+            data.get("b-tools")
         )
 
         images = None

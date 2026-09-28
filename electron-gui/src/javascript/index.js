@@ -22,6 +22,7 @@ const modeSelectorAssistant = document.getElementById("hm-assist-1");
 const modeSelectorCoder = document.getElementById("hm-coder-1");
 const budgetSelectorAssistant = document.getElementById("hm-assist-2");
 const budgetSelectorCoder = document.getElementById("hm-coder-2");
+const toolBudgetSelector = document.getElementById("hm-tools");
 
 /* ------------------------------------------------------------------- state */
 
@@ -766,6 +767,7 @@ async function sendMessage() {
         form.append("b-assist", budgetSelectorAssistant.value);
         form.append("m-coder", modeSelectorCoder.value);
         form.append("b-coder", budgetSelectorCoder.value);
+        form.append("b-tools", toolBudgetSelector.value);
 
         for (const file of generationFiles) form.append("file", file, file.name);
         if (requestChatId) form.append("chat_id", requestChatId);
