@@ -118,6 +118,24 @@ class Controller:
     def _queue_put(loop, queue, item):
         loop.call_soon_threadsafe(queue.put_nowait, item)
 
+    @staticmethod
+    def _vision_data_url(image: str) -> str:
+        """Preserve MIME-aware data URLs; accept legacy raw-base64 callers."""
+        if not isinstance(image, str):
+            raise TypeError("Encoded vision images must be strings")
+
+        if image.startswith("data:"):
+            header, separator, _ = image.partition(",")
+            allowed = {
+                f"data:image/{kind};base64"
+                for kind in ("png", "jpeg", "webp", "gif", "bmp")
+            }
+            if not separator or header not in allowed:
+                raise ValueError("Unsupported vision data URL")
+            return image
+
+        return f"data:image/jpeg;base64,{image}"
+    
     def _stream_llm_worker(
         self,
         payload,
@@ -384,7 +402,7 @@ class Controller:
                     "type": "image_url",
                     "image_url": {
                         "url": (
-                            f"data:image/jpeg;base64,{img}"
+                            self._vision_data_url(img)
                         )
                     },
                 })
@@ -1147,7 +1165,7 @@ class Controller:
                     content.append({
                         "type": "image_url",
                         "image_url": {
-                            "url": f"data:image/jpeg;base64,{img}"
+                            "url": self._vision_data_url(img)
                         },
                     })
 
