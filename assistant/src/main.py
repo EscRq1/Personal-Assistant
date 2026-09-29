@@ -47,8 +47,8 @@ from sandbox_uploads import (
 
 from sandbox_tools import (
     bind_saved_chat,
+    delete_context,
     get_manager as get_sandbox_manager,
-
     claim_manual_package_approval,
     release_manual_package_approval,
     consume_manual_package_approval,
@@ -2555,6 +2555,12 @@ async def delete(request: Request):
             },
             status_code=400,
         )
+    try:
+        destroyed = await asyncio.to_thread(delete_context, chat_id)
+        if destroyed:
+            logging.getLogger(__name__).info("Sandbox session %s deleted with chat %s", destroyed, chat_id)
+    except Exception:
+        logging.getLogger(__name__).exception("Sandbox session deletion failed for chat %s", chat_id)
 
     if assistant.current_chat_id == chat_id:
         await assistant.stop_memory_compaction()

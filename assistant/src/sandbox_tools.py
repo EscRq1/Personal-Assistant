@@ -502,3 +502,17 @@ def sandbox_install(
                 "consult backend logs."
             ),
         }
+
+
+def delete_context(chat_id: str) -> str | None:
+    """Backend-only: permanently delete the sandbox session bound to a chat.
+
+    Safe to call for every chat deletion: returns None when the chat never
+    owned a sandbox or it was already destroyed. Raises RuntimeError only if
+    a command is still executing inside it (the caller should retry after
+    stopping generation).
+    """
+    with _manager_lock:
+        if _manager is None:
+            return None
+        return _manager.delete_for_context(chat_id)
