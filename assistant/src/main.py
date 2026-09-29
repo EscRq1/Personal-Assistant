@@ -703,7 +703,8 @@ class Main:
             ):
                 if ctx.cancel_event.is_set():
                     return ""
-
+                if isinstance(token, dict):
+                    continue
                 parts.append(token)
 
             return "".join(parts)
@@ -1218,6 +1219,14 @@ class Main:
             async for token in llm_stream:
                 if ctx.cancel_event.is_set():
                     break
+                #Yield the reasoning token but skip all the memory related logic after 
+                #to prevent saving reasoning into the memory
+                if isinstance(token, dict) and "reasoning" in token:
+                    # Discardable reasoning: forwarded to the frontend
+                    # only. Excluded from full_response, so it never
+                    # reaches short-term, long-term, or RAG memory.
+                    yield token
+                    continue
 
                 full_response += token
                 yield token
@@ -1797,6 +1806,8 @@ async def _ask_reserved(request: Request, ctx):
                     return
 
                 if isinstance(token, dict) and "sandbox_files" in token:
+                    yield "data: " + json.dumps(token) + "\n\n"
+                elif isinstance(token, dict) and "reasoning" in token:
                     yield "data: " + json.dumps(token) + "\n\n"
                 else:
                     yield sse_token(token)

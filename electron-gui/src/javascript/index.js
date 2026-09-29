@@ -760,6 +760,21 @@ async function sendMessage() {
 
     isHistory = false;
     let assistantTextElement = null;
+    let thinkingBubble = null;
+
+    function ensureThinkingBubble() {
+        if (thinkingBubble) return thinkingBubble;
+        loading.remove();
+        const wrapper = document.createElement("div");
+        wrapper.className = "msg assistant thinking-wrap";
+        outputDiv.appendChild(wrapper);
+        thinkingBubble = createThinkingBubble(wrapper, "Assistant is thinking...");
+        return thinkingBubble;
+    }
+
+    function firstRealToken() {
+        if (thinkingBubble) thinkingBubble.finish();
+    }
 
     try {
         const form = new FormData();
@@ -819,14 +834,22 @@ async function sendMessage() {
                         loading.textContent = "Assistant is thinking...";
                     }
                 }
+                const reasoning = packet.reasoning;
+                if (reasoning) {
+                    if (!assistantTextElement) {
+                        ensureThinkingBubble().append(reasoning);
+                    }
+                    return false;
+                }
 
                 const token = packet.token;
                 if (token) {
                     if (!assistantTextElement) {
-                        loading.remove();
+                        firstRealToken();              // finish() the bubble (spinner off, label final)
+                        if (!thinkingBubble) loading.remove();  // non-thinking model: original path
                         assistantTextElement = appendMessage(
-                            outputDiv,
-                            "assistant",
+                            outputDiv, 
+                            "assistant", 
                             ""
                         );
                     }
@@ -881,6 +904,7 @@ async function sendMessage() {
         }
 
         // Also removes it if the stream ended without producing a token.
+        if (thinkingBubble) thinkingBubble.finish();
         loading.remove();
         finishGeneration(generationId);
 
@@ -911,6 +935,7 @@ async function sendMessage() {
         }
     } catch (err) {
         flushAssistantRender();
+        if (thinkingBubble) thinkingBubble.finish();
 
         if (
             !requestAccepted &&
@@ -925,6 +950,7 @@ async function sendMessage() {
         }
 
         if (err?.name === "AbortError" || controller.signal.aborted) {
+            if (thinkingBubble) thinkingBubble.finish();
             loading.remove();
             console.log("Generation stopped by user.");
 
@@ -957,6 +983,69 @@ async function sendMessage() {
             setGenerationUI(false);
         }
     }
+}
+
+
+function createThinkingBubble(parent, label = "Assistant is thinking...") {
+    const bubble = document.createElement("div");
+    bubble.className = "thinking-bubble";
+    bubble.classList.add("active");   // BUG FIX: spinner is CSS-hidden unless .active
+
+    const header = document.createElement("div");
+    header.className = "thinking-header";
+    header.setAttribute("role", "button");
+    header.setAttribute("tabindex", "0");
+
+    const spinner = document.createElement("span");
+    spinner.className = "thinking-spinner";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "thinking-label";
+    labelEl.textContent = label;
+
+    const chevron = document.createElement("span");
+    chevron.className = "thinking-chevron";
+
+    header.append(spinner, labelEl, chevron);
+
+    const body = document.createElement("div");
+    body.className = "thinking-body";
+
+    const text = document.createElement("div");
+    text.className = "thinking-text";
+
+    body.appendChild(text);
+    bubble.append(header, body);
+    parent.appendChild(bubble);
+
+    const toggle = () => bubble.classList.toggle("open");
+    header.addEventListener("click", toggle);
+    header.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            toggle();
+        }
+    });
+
+    return {
+        bubble,
+        header,
+        labelEl,
+        text,
+        append(chunk) {
+            text.textContent += chunk;
+            // BUG FIX: scroll the real scroll container, not the wrapper
+            if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+        },
+        finish() {
+            bubble.classList.remove("active");
+            this.labelEl.textContent = "Thought for a moment";
+            if (this.text.textContent.trim()) {
+                this.labelEl.textContent = "Thinking";
+                this.bubble.classList.add("has-content");
+            }
+        }
+    };
 }
 
 function send() {
