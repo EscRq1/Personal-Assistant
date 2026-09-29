@@ -204,6 +204,18 @@ class Controller:
 
                     token = delta.get("content")
 
+                    reasoning_token = (
+                        delta.get("reasoning")
+                        or delta.get("reasoning_content")
+                    )
+
+                    if reasoning_token:
+                        self._queue_put(
+                            loop,
+                            queue,
+                            ("reasoning", reasoning_token),
+                        )
+
                     if token:
                         self._queue_put(
                             loop,
@@ -284,6 +296,16 @@ class Controller:
 
             elif kind == "done":
                 return
+            
+            #Reasoning stream
+            elif kind == "reasoning":
+                if ctx.cancel_event.is_set():
+                    return
+
+                # Dict marker keeps reasoning out of content_parts
+                # (consumers treat dicts as pass-through only).
+                yield {"reasoning": value}
+
             
     #We need to kill the threads even if they are blocked once the cancel flag is set
     #Otherwise the threads won't be closed and will occupy the ram, slowing down the machine
@@ -494,7 +516,9 @@ class Controller:
                     ctx=ctx,
                     accumulated_tools=accumulated_tools,
                 ):
-                    content_parts.append(token)
+                    if isinstance(token, str):
+                        content_parts.append(token)
+
                     yield token
 
             except Exception:
@@ -892,10 +916,12 @@ class Controller:
                     ctx=ctx,
                     accumulated_tools=accumulated_tools,
                 ):
-                    content_parts.append(token)
+                    if isinstance(token, str):
+                        content_parts.append(token)
+
+                    yield token
 
                     # Keep streaming directly to the UI.
-                    yield token
 
             except Exception:
                 if ctx.cancel_event.is_set():

@@ -735,6 +735,80 @@ input:checked + .slider:before {
 
 .msg.thinking { color: #777; font-style: italic; }
 
+.msg.thinking-wrap {
+    /* wrapper so the bubble sits like a normal message row */
+}
+
+.thinking-bubble {
+    border: 1px solid #e2e2ea;
+    border-radius: 10px;
+    overflow: hidden;
+    font-size: 0.9em;
+    color: #555;
+}
+
+.thinking-bubble.active { border-color: #c9c9d6; }
+
+.thinking-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 12px;
+    cursor: pointer;
+    user-select: none;
+}
+
+.thinking-header:focus-visible {
+    outline: 2px solid #7a7aff;
+    outline-offset: -2px;
+}
+
+.thinking-spinner {
+    width: 12px; height: 12px;
+    border: 2px solid #ccc;
+    border-top-color: #7a7aff;
+    border-radius: 50%;
+    animation: thinking-spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+
+.thinking-bubble:not(.active) .thinking-spinner { display: none; }
+
+@keyframes thinking-spin { to { transform: rotate(360deg); } }
+
+.thinking-label { flex: 1; min-width: 0; }
+
+.thinking-chevron {
+    width: 0; height: 0;
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 6px solid #888;
+    transition: transform 0.15s ease;
+    flex-shrink: 0;
+}
+
+.thinking-bubble.open .thinking-chevron { transform: rotate(180deg); }
+
+.thinking-body {
+    display: none;
+    padding: 8px 12px;
+    border-top: 1px solid #eee;
+    max-height: 300px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+}
+
+.thinking-bubble.open .thinking-body { display: block; }
+
+.thinking-text {
+    font-family: monospace;
+    font-size: 0.85em;
+    line-height: 1.4;
+    color: #666;
+}
+
+.thinking-bubble.has-content .thinking-label { font-weight: 500; }
+
 .msg.assistant .text {
     width: 100%;
     min-width: 0;
