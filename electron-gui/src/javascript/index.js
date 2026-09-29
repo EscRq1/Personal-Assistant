@@ -728,6 +728,21 @@ function appendLiveUserTurn(output, query, files, shouldScroll = true) {
     return text;
 }
 
+const INLINE_INPUT_LINE_CAP = 500;
+
+function splitOversizedInput(text) {
+    const lines = String(text).split("\n");
+    if (lines.length <= INLINE_INPUT_LINE_CAP) return null;
+    const inline = lines.slice(0, INLINE_INPUT_LINE_CAP).join("\n");
+    const overflow = lines.slice(INLINE_INPUT_LINE_CAP).join("\n");
+    if (!overflow) return null;
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const file = new File([overflow], `pasted-snippet-${stamp}.txt`, {
+        type: "text/plain",
+    });
+    return { inline, file };
+}
+
 async function sendMessage() {
     if (isBusy()) return;
 
@@ -739,6 +754,13 @@ async function sendMessage() {
     currentAbortController = controller;
 
     const generationFiles = [...pendingAttachments];
+
+    const split = splitOversizedInput(query);
+    if (split) {
+        query = split.inline;
+        generationFiles.push(split.file);
+    }
+
     const requestChatId = currentChatId;
     const requestDraftId = currentDraftId;
     let requestAccepted = false;
@@ -761,20 +783,32 @@ async function sendMessage() {
     isHistory = false;
     let assistantTextElement = null;
     let thinkingBubble = null;
+    let workingBubble = null;
 
-    function ensureThinkingBubble() {
-        if (thinkingBubble) return thinkingBubble;
-        loading.remove();
+    function ensureWorkingBubble() {
+        if (workingBubble) return workingBubble;
+        if (loading.isConnected) loading.remove();
         const wrapper = document.createElement("div");
         wrapper.className = "msg assistant thinking-wrap";
         outputDiv.appendChild(wrapper);
-        thinkingBubble = createThinkingBubble(wrapper, "Assistant is thinking...");
+        workingBubble = createWorkingBubble(wrapper);
+        if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+        return workingBubble;
+    }
+
+    // The collapsible reasoning bubble is appended right below the
+    // working bubble as soon as the first reasoning chunk arrives.
+    function ensureThinkingBubble() {
+        if (thinkingBubble) return thinkingBubble;
+        const wrapper = ensureWorkingBubble().bubble.parentElement;
+        thinkingBubble = createThinkingBubble(wrapper);
         return thinkingBubble;
     }
 
     function firstRealToken() {
         if (thinkingBubble) thinkingBubble.finish();
     }
+
 
     try {
         const form = new FormData();
@@ -792,6 +826,8 @@ async function sendMessage() {
 
         if (requestChatId) form.append("chat_id", requestChatId);
         else form.append("draft_id", requestDraftId);
+
+        ensureWorkingBubble();
 
         const response = await fetch(`${API}/ask`, {
             method: "POST",
@@ -830,9 +866,6 @@ async function sendMessage() {
                 if (Array.isArray(packet.sandbox_files)) {
                     showUploadedFiles(userText, packet.sandbox_files);
 
-                    if (!assistantTextElement) {
-                        loading.textContent = "Assistant is thinking...";
-                    }
                 }
                 const reasoning = packet.reasoning;
                 if (reasoning) {
@@ -845,8 +878,7 @@ async function sendMessage() {
                 const token = packet.token;
                 if (token) {
                     if (!assistantTextElement) {
-                        firstRealToken();              // finish() the bubble (spinner off, label final)
-                        if (!thinkingBubble) loading.remove();  // non-thinking model: original path
+                        firstRealToken(); 
                         assistantTextElement = appendMessage(
                             outputDiv, 
                             "assistant", 
@@ -905,6 +937,7 @@ async function sendMessage() {
 
         // Also removes it if the stream ended without producing a token.
         if (thinkingBubble) thinkingBubble.finish();
+        if (workingBubble) workingBubble.stop();
         loading.remove();
         finishGeneration(generationId);
 
@@ -935,6 +968,7 @@ async function sendMessage() {
         }
     } catch (err) {
         flushAssistantRender();
+        if (workingBubble) workingBubble.stop();
         if (thinkingBubble) thinkingBubble.finish();
 
         if (
@@ -985,6 +1019,16 @@ async function sendMessage() {
     }
 }
 
+function formatWorkTime(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    const pad = (n) => String(n).padStart(2, "0");
+    if (h > 0) return `${h}h ${pad(m)}m ${pad(s)}s`;
+    if (m > 0) return `${m}m ${pad(s)}s`;
+    return `${s}s`;
+}
 
 function createThinkingBubble(parent, label = "Assistant is thinking...") {
     const bubble = document.createElement("div");
@@ -1039,13 +1083,48 @@ function createThinkingBubble(parent, label = "Assistant is thinking...") {
         },
         finish() {
             bubble.classList.remove("active");
-            this.labelEl.textContent = "Thought for a moment";
+            this.labelEl.textContent = "Chain-Of-Thoughts";
             if (this.text.textContent.trim()) {
-                this.labelEl.textContent = "Thinking";
                 this.bubble.classList.add("has-content");
             }
         }
     };
+}
+
+
+function createWorkingBubble(parent) {
+    const bubble = document.createElement("div");
+    bubble.className = "working-note";
+
+    const labelEl = document.createElement("span");
+    labelEl.className = "working-label";
+    labelEl.textContent = "Working for 0s";
+
+    bubble.appendChild(labelEl);
+    parent.appendChild(bubble);
+
+    const startedAt = performance.now();
+    let stopped = false;
+    const timer = setInterval(() => {
+        if (!stopped) {
+            labelEl.textContent =
+                "Working for " + formatWorkTime(performance.now() - startedAt);
+        }
+    }, 250);
+
+    return {
+        bubble,
+        labelEl,
+        stop() {
+            if (stopped) return;
+            stopped = true;
+            clearInterval(timer);
+            bubble.classList.add("done");
+            this.labelEl.textContent =
+                "Worked for " + formatWorkTime(performance.now() - startedAt);
+        }
+    };
+
 }
 
 function send() {
@@ -1207,6 +1286,25 @@ document.addEventListener("paste", event => {
     if (files.length) {
         event.preventDefault();
         addToTray(files);
+    }
+    
+    const target = event.target;
+    const pasted = event.clipboardData?.getData("text/plain");
+
+    if (target === ain && typeof pasted === "string") {
+        const pastedLines = pasted.split("\n");
+
+        if (pastedLines.length > INLINE_INPUT_LINE_CAP) {
+            // The paste itself is too large to prefill: the whole paste
+            // becomes an attached text file. The input value is untouched, so
+            // anything already typed stays exactly as it was.
+            event.preventDefault();
+            const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+            const file = new File([pasted], `pasted-snippet-${stamp}.txt`, {
+                type: "text/plain",
+            });
+            addToTray([file]);
+        }
     }
 });
 document.addEventListener("dragover", event => {
