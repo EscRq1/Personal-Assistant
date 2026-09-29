@@ -19,8 +19,6 @@ html, body {
     transition: 0.5s;
 }
 
-
-
 .header {
     grid-area: header;
     display: flex;
@@ -258,8 +256,6 @@ html, body {
     z-index: 9999;
 }
 
-
-
 .sub-content {
     grid-area: main;
     display: grid;
@@ -277,8 +273,6 @@ html, body {
     display: flex;
     flex-direction: column;
 }
-
-
 
 .input-cont {
   grid-area: input;
@@ -302,7 +296,6 @@ html, body {
 
 #img-btn { grid-area: attach; }
 #m-btn { grid-area: mode; }
-
 
 .attachment-tray {
     display: flex;
@@ -377,13 +370,11 @@ html, body {
 
 }
 
-
 .switch input {
     opacity: 0;
     width: 0;
     height: 0;
 }
-
 
 .slider {
     position: absolute;
@@ -520,8 +511,6 @@ input:checked + .slider:before {
 
 }
 
-
-
 .sidebar {
     grid-area: sidebar;
     display: grid;
@@ -538,9 +527,6 @@ input:checked + .slider:before {
     overflow-x: hidden;
     overflow-y: auto;   /* auto, not scroll — only show scrollbar when needed */
 }
-
-
-
 
 .col-btn, .new-btn, .save-btn{
     border: 0;
@@ -573,7 +559,6 @@ input:checked + .slider:before {
     grid-area: save-btn;
     display: flex;
 }
-
 
 .new-btn::after{
     background-color: rgb(0, 0, 0);
@@ -679,13 +664,9 @@ input:checked + .slider:before {
     content: url("../../assets/ellipsis-vertical-solid-full.svg");
 }
 
-
-
-
 .sidebar div:hover .menu-btn {
     display: flex;
 }
-
 
 .sidebar::-webkit-scrollbar {
     height: 5px;
@@ -711,7 +692,6 @@ input:checked + .slider:before {
 }
 
 .msg .meta { font-size: 12px; opacity: 0.7; margin-bottom: 6px; }
-
 
 .msg.user {
   margin-left: auto;
@@ -809,6 +789,18 @@ input:checked + .slider:before {
 
 .thinking-bubble.has-content .thinking-label { font-weight: 500; }
 
+.working-note {
+    font-size: 0.9em;
+    color: #999;
+    padding: 2px 2px 0;
+}
+
+.working-note .working-label {
+    font-variant-numeric: tabular-nums;
+}
+
+.thinking-wrap .thinking-bubble { margin-top: 6px; }
+
 .msg.assistant .text {
     width: 100%;
     min-width: 0;
@@ -884,7 +876,6 @@ input:checked + .slider:before {
     font-size: 0.92em; 
 }
 
-
 .math-bubble .katex-display {
     min-width: 0;
     width: max-content;     
@@ -895,12 +886,10 @@ input:checked + .slider:before {
     display: inline-block; width: 0.5em; 
 }
 
-
 .katex .fbox-box[style*="width:0"],
 .katex .fbox-box[style*="width: 0"] {
     display: none !important;
 }
-
 
 /* ===== Static/fixed turn-map column =====
    The main .content area remains the scroll container, while the turn map
