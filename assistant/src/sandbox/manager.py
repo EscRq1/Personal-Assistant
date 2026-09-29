@@ -447,7 +447,43 @@ class SandboxManager:
             with self._lock:
                 self._contexts = {k: v for k, v in self._contexts.items() if v != session.id}
                 self._write_json(self.base_dir / "contexts.json", self._contexts)
+    def delete_for_context(self, context_id: str) -> str | None:
+        key = self._context_key(context_id)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("Sandbox manager is closed")
+            sid = self._contexts.get(key)
+            if sid is None:
+                return None
+            if sid in self._active_cancel:
+                raise RuntimeError("Sandbox is executing; stop it before deleting the chat")
+        session = self.get_session(sid)          # brief global-lock use only; never held across destroy
+        if session is None:
+            with self._lock:
+                if self._contexts.get(key) == sid:
+                    del self._contexts[key]
+                    self._write_json(self.base_dir / "contexts.json", self._contexts)
+            try:
+                self.workspaces.destroy(sid)     # sweep dir even if session.json said destroyed
+            except Exception:
+                log.exception("Sandbox workspace sweep failed for %s", sid)
+            return sid
+        lock = self._session_lock(session)
+        with lock:                               # serialize with exec(); global lock NOT held while waiting
+            with self._lock:
+                if sid in self._active_cancel:   # re-check under session lock closes the TOCTOU window
+                    raise RuntimeError("Sandbox is executing; stop it before deleting the chat")
+                if self._contexts.get(key) == sid:
+                    del self._contexts[key]
+                    self._write_json(self.base_dir / "contexts.json", self._contexts)
+            if session.state == SessionState.BROKEN:
+                session.state = SessionState.READY  # safe: session lock held, no registered execution
+            self.destroy(session)
+        return sid
 
+
+    
+        
     def reconcile(self) -> list[str]:
         """Explicit startup operation, before accepting work; never removes workspaces."""
         with self._lock:
