@@ -71,7 +71,7 @@ class LlamaRouterManager:
             # Router must see all 3 GPUs.
             # ----------------------------------------------------
 
-            env["CUDA_VISIBLE_DEVICES"] = "0,1,2"
+            env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
             env["LD_LIBRARY_PATH"] = (
                 f"{self.lib_dir}:"
