@@ -570,11 +570,8 @@ input:checked + .slider:before {
     display: none;
     
 
-    margin-top: 10px; 
+    transform: translateX(-70%); 
 
-    left: 60%;
-    transform: translateX(-50%); 
-    
 
     white-space: nowrap; 
     background: black;
