@@ -712,10 +712,6 @@ input:checked + .slider:before {
 
 .msg.thinking { color: #777; font-style: italic; }
 
-.msg.thinking-wrap {
-    /* wrapper so the bubble sits like a normal message row */
-}
-
 .thinking-bubble {
     border: 1px solid #e2e2ea;
     border-radius: 10px;
