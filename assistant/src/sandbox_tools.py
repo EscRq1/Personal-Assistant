@@ -139,6 +139,15 @@ SANDBOX_EXEC_SCHEMA: dict[str, Any] = {
             "are available. Shell composition is supported; default timeout is 30 seconds. "
             "Use sandbox_install for approved Python packages; runtime pip is offline. "
             "After installation python uses /workspace/.venv; use python -m pytest for tests."
+            "LaTeX: Full TeX Live is installed locally."
+            "Use: latex-compile --outdir /workspace/output /workspace/document.tex"
+            "The helper defaults to XeLaTeX, creates the output directory, handles"
+            "repeat compilation passes, and retains logs. Optional engines:"
+            "--engine pdflatex or --engine lualatex."
+
+            "Keep source files and outputs under /workspace across tool calls."
+            "No Tectonic cache setup or package downloads are needed."
+            "On failure, inspect the compilation log before changing the document."
         ),
         "parameters": {
             "type": "object",
