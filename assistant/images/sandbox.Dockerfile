@@ -8,6 +8,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfontconfig1 libfreetype6 libgraphite2-3 libharfbuzz0b \
     libicu72 libpng16-16 libssl3 zlib1g \
     fontconfig fonts-dejavu-core poppler-utils \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-rus \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 
