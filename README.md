@@ -1,7 +1,8 @@
 INSTALL REQUIRED PYTHON DEPENDENCIES
 =
+```bash
 pip install -r requirements.txt
-
+```
 DOWNLOAD ESSENTIAL PACKAGE WHEELS FOR THE SANDBOX MODULE
 =
 ```bash
