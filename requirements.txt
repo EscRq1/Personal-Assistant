@@ -1,16 +1,13 @@
+fastapi
+uvicorn[standard]
 requests
 beautifulsoup4
-ddgs
-chromadb
-pydantic>=2.7
-python-dotenv
 colorama
-flask[async]
-flask_cors
-transformers
 torch
+transformers
+chromadb
 rapidfuzz
-
+ddgs
 
 
 
