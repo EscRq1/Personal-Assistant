@@ -1,9 +1,10 @@
-INSTALL REQUIRED PYTHON DEPENDANCIES
+INSTALL REQUIRED PYTHON DEPENDENCIES
 =
 pip install -r requirements.txt
 
-DOWNLOAD REQUIRED PACKAGE WHEELS FOR THE SANDBOX MODULE
+DOWNLOAD ESSENTIAL PACKAGE WHEELS FOR THE SANDBOX MODULE
 =
+```bash
 set -euo pipefail
 
 catalog="./catalog.json"
@@ -40,3 +41,4 @@ python3 -m pip download \
     --dest "$destination"
 
 echo "Wheels downloaded to $destination"
+```
