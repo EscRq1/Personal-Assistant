@@ -1695,6 +1695,18 @@ class Controller:
             if was_clipped:
                 break
 
+            return json.dumps(
+                {
+                    "query": request,
+                    "found": bool(output),
+                    "selection_mode": selection_mode,
+                    "memories": output,
+                    "estimated_tokens": total_tokens,
+                    "truncated": truncated,
+                },
+                ensure_ascii=False,
+            )
+
     def sandbox_install(self, **args):
         """Called through the existing cancellable tool worker, never the event loop."""
         return install_sandbox_packages(args, _execution_context.get())
