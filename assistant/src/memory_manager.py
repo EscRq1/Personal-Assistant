@@ -1400,6 +1400,7 @@ class MemoryManager:
         top_n: int = 8,
         max_chars: int = 12000,
         exclude_chat_id: str | None = None,
+        ctx = None
     ):
         """
         Automatic long-term retrieval.
@@ -1432,6 +1433,9 @@ class MemoryManager:
 
         if not basic.get("use_rag", False):
             return empty
+
+        if ctx is not None:
+            ctx.backend_stage = "Extracting relevant data from long-term memory"
 
         candidates = self._hybrid_candidates(
             query=query,

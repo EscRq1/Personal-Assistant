@@ -2,6 +2,7 @@ import requests
 import json
 import threading
 import asyncio
+from queue import Queue
 from contextvars import ContextVar
 import socket
 
@@ -32,11 +33,18 @@ from tools.estimate_tokens import estimate_tokens
 from sandbox_tools import sandbox_exec as execute_sandbox_tool
 from sandbox_tools import sandbox_install as install_sandbox_packages
 
-
-
-
 # Request-scoped context propagated through asyncio.to_thread().
 _execution_context = ContextVar("execution_context", default=None)
+
+
+def _tool_stage(tool_call, fallback="Executing tool"):
+    """UI metadata is optional at runtime, even if required by the schema."""
+    try:
+        arguments = json.loads(tool_call["function"]["arguments"])
+        summary = arguments.get("summary") if isinstance(arguments, dict) else None
+    except (KeyError, TypeError, ValueError):
+        summary = None
+    return summary.strip() if isinstance(summary, str) and summary.strip() else fallback
 
 
 class Controller:
@@ -265,6 +273,9 @@ class Controller:
     ):
         """Bridge a blocking streaming request into asyncio."""
 
+        ctx.backend_stage = (
+            "Coder is thinking..." if owner == "coder" else "Assistant is thinking..."
+        )
         queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -591,6 +602,7 @@ class Controller:
                 print(f"Generated task: {task}")
 
                 #Start the coding stream
+                ctx.backend_stage = _tool_stage(coder_call, "Delegating to coder")
                 async for token in self.callCoder(
                     task=task,
                     ctx = ctx,
@@ -627,7 +639,8 @@ class Controller:
             assistant_content = "".join(
                 content_parts
             )
-
+            
+            ctx.backend_stage = _tool_stage(tool_calls[0])
 
             # Preserve the assistant's tool request.
 
@@ -1106,6 +1119,9 @@ class Controller:
             assistant_content = "".join(
                 content_parts
             )
+
+
+            ctx.backend_stage = _tool_stage(tool_calls[0])
 
             messages.append(
                 self.tool_controller.build_assistant_tool_message(
@@ -1836,9 +1852,27 @@ class ToolController:
         """
 
 
-        return execute_tool_calls(
-            tool_calls
-        )
+        # Keep summaries in the model transcript, but never pass UI metadata
+        # to Python tool functions. Preserve malformed input for the executor's
+        # existing validation/error handling.
+        execution_calls = []
+        for call in tool_calls:
+            function = call.get("function") or {}
+            try:
+                arguments = json.loads(function.get("arguments", "{}"))
+            except (TypeError, ValueError):
+                execution_calls.append(call)
+                continue
+            if not isinstance(arguments, dict) or "summary" not in arguments:
+                execution_calls.append(call)
+                continue
+            arguments.pop("summary")
+            execution_calls.append({
+                **call,
+                "function": {**function, "arguments": json.dumps(arguments)},
+            })
+
+        return execute_tool_calls(execution_calls)
 
     # ========================================================
     # BUILD ASSISTANT TOOL-CALL MESSAGE
@@ -2203,7 +2237,13 @@ class ExecutionContext:
         self.sandbox_context_id = None
 
 
+
+
         self.llm_phase = ""
+        # Stage events and generated output share one request-scoped FIFO.
+        self.stream_queue = Queue()
+        self._backend_stage = ""
+        self._stage_lock = threading.Lock()
 
         # Currently active requests.Response object, when available.
         self._response = None
@@ -2221,6 +2261,24 @@ class ExecutionContext:
 
         
 
+
+
+        
+
+
+    @property
+    def backend_stage(self):
+        with self._stage_lock:
+            return self._backend_stage
+
+    @backend_stage.setter
+    def backend_stage(self, value):
+        stage = value.strip() if isinstance(value, str) else ""
+        with self._stage_lock:
+            if stage == self._backend_stage:
+                return
+            self._backend_stage = stage
+            self.stream_queue.put(("token", {"backend_stage": stage}))
 
     def begin_llm(self):
         self.llm_done.clear()
