@@ -6,7 +6,7 @@ import uuid
 import threading
 import time
 import asyncio
-from queue import Queue
+from queue import Queue, Empty
 from datetime import datetime
 from contextlib import asynccontextmanager
 
@@ -1120,6 +1120,7 @@ class Main:
                 k=20,
                 top_n=8,
                 exclude_chat_id=self.current_chat_id,
+                ctx = ctx
             )
 
             t2 = time.perf_counter()
@@ -1146,6 +1147,8 @@ class Main:
             recent_history = None
 
         current_chat_context = self.form_short_term_memory()
+
+        ctx.backend_stage = "Assistant is thinking..."
 
         # --------------------------------------------------------
         # 3. Prompt
@@ -1372,16 +1375,16 @@ def _run_async_generation(async_generator, output_queue, ctx, on_finished=None):
             ctx.generation_done.set()
 
 
+
 def stream_async_generator(async_generator, ctx, on_finished=None):
     """
-    Bridge an async generation stream into a synchronous iterator.
-    FastAPI/Starlette can consume a normal synchronous iterable for
-    StreamingResponse in its worker pool. The actual generation runs in
-    a separate thread/event loop, matching the architecture of the
-    known-good Flask implementation.
+    Bridge async generation into a synchronous SSE iterator.
+
+    Forward generated tokens and backend-stage changes through
+    the same stream.
     """
 
-    output_queue = Queue()
+    output_queue = ctx.stream_queue
 
     worker = threading.Thread(
         target=_run_async_generation,
@@ -1392,7 +1395,15 @@ def stream_async_generator(async_generator, ctx, on_finished=None):
 
     try:
         while True:
-            kind, value = output_queue.get()
+            if ctx.cancel_event.is_set():
+                return
+
+            try:
+                kind, value = output_queue.get(timeout=0.1)
+
+            except Empty:
+                # Wake periodically so cancellation works during blocking tools.
+                continue
 
             if kind == "token":
                 if ctx.cancel_event.is_set():
@@ -1414,6 +1425,7 @@ def stream_async_generator(async_generator, ctx, on_finished=None):
 
     finally:
         ctx.cancel_event.set()
+
 
 
 def sse_token(token):
@@ -1805,11 +1817,11 @@ async def _ask_reserved(request: Request, ctx):
                 if ctx.cancel_event.is_set():
                     return
 
-                if isinstance(token, dict) and "sandbox_files" in token:
-                    yield "data: " + json.dumps(token) + "\n\n"
-                elif isinstance(token, dict) and "reasoning" in token:
+                if isinstance(token, dict):
+                    # Reasoning, sandbox files, or backend stage updates
                     yield "data: " + json.dumps(token) + "\n\n"
                 else:
+                    # Normal text tokens
                     yield sse_token(token)
 
         except GeneratorExit:

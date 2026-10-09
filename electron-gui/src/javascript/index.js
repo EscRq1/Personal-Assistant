@@ -775,7 +775,7 @@ async function sendMessage() {
     loading.className = "msg assistant thinking";
     loading.textContent = generationFiles.length
         ? "Uploading attachments..."
-        : "Assistant is thinking...";
+        : "Thinking";
 
     outputDiv.appendChild(loading);
     if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
@@ -796,17 +796,12 @@ async function sendMessage() {
         return workingBubble;
     }
 
-    // The collapsible reasoning bubble is appended right below the
-    // working bubble as soon as the first reasoning chunk arrives.
+    // One header displays live stages; its body accumulates reasoning.
     function ensureThinkingBubble() {
         if (thinkingBubble) return thinkingBubble;
         const wrapper = ensureWorkingBubble().bubble.parentElement;
-        thinkingBubble = createThinkingBubble(wrapper);
+        thinkingBubble = createThinkingBubble(wrapper, loading.textContent);
         return thinkingBubble;
-    }
-
-    function firstRealToken() {
-        if (thinkingBubble) thinkingBubble.finish();
     }
 
 
@@ -827,7 +822,7 @@ async function sendMessage() {
         if (requestChatId) form.append("chat_id", requestChatId);
         else form.append("draft_id", requestDraftId);
 
-        ensureWorkingBubble();
+        ensureThinkingBubble();
 
         const response = await fetch(`${API}/ask`, {
             method: "POST",
@@ -854,6 +849,9 @@ async function sendMessage() {
         let streamFinished = false;
 
         function handleEvent(event) {
+            if (generationId !== currentGenerationId || controller.signal.aborted) {
+                return false;
+            }
             const line = event.trim();
             if (!line.startsWith("data: ")) return false;
 
@@ -863,22 +861,25 @@ async function sendMessage() {
             try {
                 const packet = JSON.parse(data);
 
+                if (typeof packet.backend_stage === "string") {
+                    const bubble = ensureThinkingBubble();
+                    bubble.setStage(packet.backend_stage);
+                    bubble.appendStage(packet.backend_stage);
+                }
+
                 if (Array.isArray(packet.sandbox_files)) {
                     showUploadedFiles(userText, packet.sandbox_files);
 
                 }
                 const reasoning = packet.reasoning;
                 if (reasoning) {
-                    if (!assistantTextElement) {
-                        ensureThinkingBubble().append(reasoning);
-                    }
+                    ensureThinkingBubble().append(reasoning);
                     return false;
                 }
 
                 const token = packet.token;
                 if (token) {
                     if (!assistantTextElement) {
-                        firstRealToken(); 
                         assistantTextElement = appendMessage(
                             outputDiv, 
                             "assistant", 
@@ -1030,39 +1031,79 @@ function formatWorkTime(ms) {
     return `${s}s`;
 }
 
-function createThinkingBubble(parent, label = "Assistant is thinking...") {
-    const bubble = document.createElement("div");
-    bubble.className = "thinking-bubble";
-    bubble.classList.add("active");   // BUG FIX: spinner is CSS-hidden unless .active
+function createThinkingBubble(parent, label = "Thinking") {
+    if (!document.getElementById("thinking-tool-call-styles")) {
+        const style = document.createElement("style");
+        style.id = "thinking-tool-call-styles";
+        style.textContent = `
+            .thinking-tool-call {
+                display: block; margin: 10px 0; padding: 10px 12px;
+                border: 1px solid #a5a0ed; border-left: 4px solid #7564d9;
+                border-radius: 8px; background: rgba(117, 100, 217, .10);
+                color: inherit; font-style: normal; white-space: normal;
+            }
+            .thinking-tool-call-title { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+            .thinking-tool-call-name { font-weight: 700; color: #7564d9; overflow-wrap: anywhere; }
+            .thinking-tool-call-number { font-size: .85em; opacity: .75; }
+            .thinking-tool-call-summary { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
+            .thinking-tool-call details { margin-top: 7px; }
+            .thinking-tool-call summary { cursor: pointer; font-weight: 500; }
+            .thinking-tool-call pre {
+                margin: 7px 0 0; max-height: 220px; overflow: auto;
+                white-space: pre-wrap; overflow-wrap: anywhere; font-size: .95em;
+            }
+            .thinking-reasoning-segment { white-space: pre-wrap; }
+            .thinking-stage-note {
+                margin: 12px 0;
+                padding: 0 0 6px;
+                border: 0;
+                border-bottom: 1px solid #aaa;
+                border-radius: 0;
+                background: transparent;
 
+                font-weight: 600;
+                font-style: normal;
+                color: inherit;
+                white-space: pre-wrap;
+                overflow-wrap: anywhere;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    const bubble = document.createElement("div");
+    bubble.className = "thinking-bubble active";
     const header = document.createElement("div");
     header.className = "thinking-header";
     header.setAttribute("role", "button");
     header.setAttribute("tabindex", "0");
-
+    header.setAttribute("aria-expanded", "false");
     const spinner = document.createElement("span");
     spinner.className = "thinking-spinner";
-
     const labelEl = document.createElement("span");
     labelEl.className = "thinking-label";
     labelEl.textContent = label;
-
     const chevron = document.createElement("span");
     chevron.className = "thinking-chevron";
-
     header.append(spinner, labelEl, chevron);
-
     const body = document.createElement("div");
     body.className = "thinking-body";
-
     const text = document.createElement("div");
     text.className = "thinking-text";
-
     body.appendChild(text);
     bubble.append(header, body);
     parent.appendChild(bubble);
 
-    const toggle = () => bubble.classList.toggle("open");
+    let finished = false;
+    let reasoningSegment = null;
+    let callCount = 0;
+    const scroll = () => {
+        if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+    };
+    const toggle = () => {
+        const open = bubble.classList.toggle("open");
+        header.setAttribute("aria-expanded", String(open));
+    };
     header.addEventListener("click", toggle);
     header.addEventListener("keydown", (e) => {
         if (e.key === "Enter" || e.key === " ") {
@@ -1072,24 +1113,67 @@ function createThinkingBubble(parent, label = "Assistant is thinking...") {
     });
 
     return {
-        bubble,
-        header,
-        labelEl,
-        text,
+        bubble, header, labelEl, text,
+        setStage(stage) {
+            if (finished || typeof stage !== "string") return;
+            labelEl.textContent = stage.trim() || "Thinking";
+        },
         append(chunk) {
-            text.textContent += chunk;
-            // BUG FIX: scroll the real scroll container, not the wrapper
-            if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+            if (finished || typeof chunk !== "string" || !chunk) return;
+            if (!reasoningSegment) {
+                reasoningSegment = document.createElement("div");
+                reasoningSegment.className = "thinking-reasoning-segment";
+                text.appendChild(reasoningSegment);
+            }
+            reasoningSegment.appendChild(document.createTextNode(chunk));
+            scroll();
+        },
+        appendStage(stage) {
+            if (finished || typeof stage !== "string") return;
+
+            const cleaned = stage.trim();
+            if (!cleaned || cleaned === this._lastLoggedStage) return;
+
+            this._lastLoggedStage = cleaned;
+
+            // Keep generic thinking states in the header only.
+            const normalized = cleaned
+                .toLowerCase()
+                .replace(/[.…]+$/u, "")
+                .trim();
+
+            if ([
+                "thinking",
+                "assistant is thinking",
+                "coder is thinking"
+            ].includes(normalized)) {
+                return;
+            }
+
+            const note = document.createElement("div");
+            note.className = "thinking-stage-note";
+            note.textContent = `[TOOL CALL] ${cleaned}`;
+
+            text.appendChild(note);
+            reasoningSegment = null;
+
+            bubble.classList.add("has-content");
+            scroll();
         },
         finish() {
+            if (finished) return;
+            finished = true;
             bubble.classList.remove("active");
-            this.labelEl.textContent = "Chain-Of-Thoughts";
-            if (this.text.textContent.trim()) {
-                this.bubble.classList.add("has-content");
+            if (callCount || text.textContent.trim()) {
+                labelEl.textContent = "Chain-Of-Thoughts";
+                bubble.classList.add("has-content");
+            } else {
+                bubble.remove();
             }
         }
     };
 }
+
 
 
 function createWorkingBubble(parent) {
@@ -1100,15 +1184,17 @@ function createWorkingBubble(parent) {
     labelEl.className = "working-label";
     labelEl.textContent = "Working for 0s";
 
-    bubble.appendChild(labelEl);
+    bubble.append(labelEl);
     parent.appendChild(bubble);
 
     const startedAt = performance.now();
     let stopped = false;
+
     const timer = setInterval(() => {
         if (!stopped) {
             labelEl.textContent =
-                "Working for " + formatWorkTime(performance.now() - startedAt);
+                "Working for " +
+                formatWorkTime(performance.now() - startedAt);
         }
     }, 250);
 
@@ -1117,15 +1203,19 @@ function createWorkingBubble(parent) {
         labelEl,
         stop() {
             if (stopped) return;
+
             stopped = true;
             clearInterval(timer);
+
             bubble.classList.add("done");
-            this.labelEl.textContent =
-                "Worked for " + formatWorkTime(performance.now() - startedAt);
+            labelEl.textContent =
+                "Worked for " +
+                formatWorkTime(performance.now() - startedAt);
+
         }
     };
-
 }
+
 
 function send() {
     if (isBusy()) return;

@@ -1,6 +1,13 @@
 from typing import Callable, Any
 from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
 
+SUMMARY_PROMPT = {
+        "summary": {
+            "type": "string",
+            "description": "A short, human-readable description of what this specific tool call is about to do. Describe the concrete action and its target, not the generic purpose of the tool. Use a concise present-participle phrase (3–12 words), such as 'Searching the web for NASA satellite datasets', 'Retrieving previous discussion about GPU configuration', 'Executing Python code to analyze CSV data', or 'Delegating database schema debugging to the coder'. Avoid vague descriptions, internal tool names, unnecessary details, and claims that the action has already succeeded."
+        }
+    }
+
 
 TOOLS = [
     SANDBOX_EXEC_SCHEMA,
@@ -352,6 +359,15 @@ TOOLS = [
         }
     },
 ]
+
+for tool in TOOLS:
+    parameters = tool["function"]["parameters"]
+
+    parameters.setdefault("properties", {}).update(SUMMARY_PROMPT)
+
+    required = parameters.setdefault("required", [])
+    if "summary" not in required:
+        required.append("summary")
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}
 
