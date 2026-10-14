@@ -861,10 +861,18 @@ async function sendMessage() {
             try {
                 const packet = JSON.parse(data);
 
-                if (typeof packet.backend_stage === "string") {
+                const stage = packet.backend_stage;
+
+                if (stage && typeof stage === "object" && !Array.isArray(stage)) {
+                    const summary =
+                        typeof stage.summary === "string" ? stage.summary : "";
+
+                    const tool =
+                        typeof stage.tool === "string" ? stage.tool.trim() : "";
+
                     const bubble = ensureThinkingBubble();
-                    bubble.setStage(packet.backend_stage);
-                    bubble.appendStage(packet.backend_stage);
+                    bubble.setStage(summary, tool);
+                    bubble.appendStage(summary, tool);
                 }
 
                 if (Array.isArray(packet.sandbox_files)) {
@@ -1067,9 +1075,48 @@ function createThinkingBubble(parent, label = "Thinking") {
                 white-space: pre-wrap;
                 overflow-wrap: anywhere;
             }
+            .thinking-tool-icon {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+
+                width: 16px;
+                height: 16px;
+                flex-shrink: 0;
+
+                font-size: 15px;
+                font-style: normal;
+                line-height: 1;
+
+                border: none;
+                background: transparent;
+                animation: none;
+            }
+
+            .thinking-tool-icon img {
+                display: block;
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+            }
+
+            .thinking-bubble:not(.active) .thinking-tool-icon {
+                display: none;
+            }
         `;
         document.head.appendChild(style);
     }
+
+    const TOOL_ICONS = new Map([
+        ["web_call",        "../../assets/globe-solid-full.svg"],
+        ["memory_call",     "../../assets/brain-solid-full.svg"],
+        ["search_current_chat",     "../../assets/brain-solid-full.svg"],
+        ["get_chat_turn",     "../../assets/file-pen-solid-full.svg"],
+        ["call_coder",      "../../assets/wrench-solid-full.svg"],
+        ["sandbox_exec",    "../../assets/gears-solid-full.svg"],
+        ["sandbox_install", "../../assets/cubes-solid-full.svg"],
+        ["write_notebook",  "../../assets/file-pen-solid-full.svg"],
+    ]);
 
     const bubble = document.createElement("div");
     bubble.className = "thinking-bubble active";
@@ -1114,9 +1161,33 @@ function createThinkingBubble(parent, label = "Thinking") {
 
     return {
         bubble, header, labelEl, text,
-        setStage(stage) {
+        setStage(stage, tool = "") {
             if (finished || typeof stage !== "string") return;
+
             labelEl.textContent = stage.trim() || "Thinking";
+
+            const toolName = typeof tool === "string" ? tool.trim() : "";
+
+            spinner.replaceChildren();
+
+            if (toolName) {
+                spinner.className = "thinking-tool-icon";
+                spinner.title = toolName;
+
+                const icon = document.createElement("img");
+                icon.src = TOOL_ICONS.get(toolName)
+                    || "../../assets/wrench-solid-full.svg";
+
+                icon.alt = "";
+                icon.draggable = false;
+
+                spinner.appendChild(icon);
+            } else {
+                spinner.className = "thinking-spinner";
+                spinner.removeAttribute("title");
+            }
+
+            spinner.setAttribute("aria-hidden", "true");
         },
         append(chunk) {
             if (finished || typeof chunk !== "string" || !chunk) return;
@@ -1128,13 +1199,14 @@ function createThinkingBubble(parent, label = "Thinking") {
             reasoningSegment.appendChild(document.createTextNode(chunk));
             scroll();
         },
-        appendStage(stage) {
+        appendStage(stage, tool = "") {
             if (finished || typeof stage !== "string") return;
 
             const cleaned = stage.trim();
-            if (!cleaned || cleaned === this._lastLoggedStage) return;
+            const key = JSON.stringify([tool, cleaned]);
 
-            this._lastLoggedStage = cleaned;
+            if (!cleaned || key === this._lastLoggedStage) return;
+            this._lastLoggedStage = key;
 
             // Keep generic thinking states in the header only.
             const normalized = cleaned
@@ -1152,7 +1224,10 @@ function createThinkingBubble(parent, label = "Thinking") {
 
             const note = document.createElement("div");
             note.className = "thinking-stage-note";
-            note.textContent = `[TOOL CALL] ${cleaned}`;
+            note.dataset.tool = tool;
+            note.textContent = tool
+                ? `[${tool}] ${cleaned}`
+                : cleaned;
 
             text.appendChild(note);
             reasoningSegment = null;

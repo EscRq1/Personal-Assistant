@@ -38,14 +38,42 @@ _execution_context = ContextVar("execution_context", default=None)
 
 
 def _tool_stage(tool_call, fallback="Executing tool"):
-    """UI metadata is optional at runtime, even if required by the schema."""
-    try:
-        arguments = json.loads(tool_call["function"]["arguments"])
-        summary = arguments.get("summary") if isinstance(arguments, dict) else None
-    except (KeyError, TypeError, ValueError):
-        summary = None
-    return summary.strip() if isinstance(summary, str) and summary.strip() else fallback
+    function = (
+        tool_call.get("function")
+        if isinstance(tool_call, dict)
+        else None
+    )
+    function = function if isinstance(function, dict) else {}
 
+    tool_name = function.get("name")
+    tool_name = (
+        tool_name.strip()
+        if isinstance(tool_name, str) and tool_name.strip()
+        else None
+    )
+
+    arguments = function.get("arguments", "{}")
+
+    try:
+        if isinstance(arguments, str):
+            arguments = json.loads(arguments)
+    except (TypeError, ValueError):
+        arguments = {}
+
+    summary = (
+        arguments.get("summary")
+        if isinstance(arguments, dict)
+        else None
+    )
+
+    return {
+        "tool": tool_name,
+        "summary": (
+            summary.strip()
+            if isinstance(summary, str) and summary.strip()
+            else fallback
+        ),
+    }
 
 class Controller:
 
@@ -273,9 +301,8 @@ class Controller:
     ):
         """Bridge a blocking streaming request into asyncio."""
 
-        ctx.backend_stage = (
-            "Coder is thinking..." if owner == "coder" else "Assistant is thinking..."
-        )
+        output_started = False
+
         queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
 
@@ -295,6 +322,17 @@ class Controller:
 
         while True:
             kind, value = await queue.get()
+
+            if kind in {"token", "reasoning"} and value:
+                if ctx.cancel_event.is_set():
+                    return
+
+                if not output_started:
+                    output_started = True
+
+                    ctx.backend_stage = (
+                        "Thinking"
+                    )
 
             if kind == "token":
                 if ctx.cancel_event.is_set():
@@ -2254,7 +2292,7 @@ class ExecutionContext:
         self.llm_phase = ""
         # Stage events and generated output share one request-scoped FIFO.
         self.stream_queue = Queue()
-        self._backend_stage = ""
+        self._backend_stage = {"tool": None, "summary": ""}
         self._stage_lock = threading.Lock()
 
         # Currently active requests.Response object, when available.
@@ -2273,11 +2311,6 @@ class ExecutionContext:
 
         
 
-
-
-        
-
-
     @property
     def backend_stage(self):
         with self._stage_lock:
@@ -2285,12 +2318,35 @@ class ExecutionContext:
 
     @backend_stage.setter
     def backend_stage(self, value):
-        stage = value.strip() if isinstance(value, str) else ""
+        if isinstance(value, str):
+            # Preserve existing thinking/memory stage assignments.
+            tool = None
+            summary = value
+        elif isinstance(value, dict):
+            tool = value.get("tool")
+            summary = value.get("summary")
+        else:
+            tool = None
+            summary = ""
+
+        stage = {
+            "tool": (
+                tool.strip()
+                if isinstance(tool, str) and tool.strip()
+                else None
+            ),
+            "summary": summary.strip() if isinstance(summary, str) else "",
+        }
+
         with self._stage_lock:
             if stage == self._backend_stage:
                 return
+
             self._backend_stage = stage
-            self.stream_queue.put(("token", {"backend_stage": stage}))
+            self.stream_queue.put((
+                "token",
+                {"backend_stage": stage.copy()},
+            ))
 
     def begin_llm(self):
         self.llm_done.clear()
