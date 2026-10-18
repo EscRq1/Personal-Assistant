@@ -71,9 +71,15 @@ async def lifespan(app: FastAPI):
             f"{len(removed)} stale execution container(s)."
         )
 
-    yield
-
-    # Shutdown logic could go here later if needed.
+    try:
+        yield
+    finally:
+        from agent_runtime import shutdown_delegations
+        from worker_server import stop_worker_servers
+        drained = await asyncio.to_thread(shutdown_delegations, 30)
+        await asyncio.to_thread(stop_worker_servers)
+        if not drained:
+            print("[AGENTS] Shutdown cancelled workers; sandbox cleanup is still draining.")
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(AskBodyLimitMiddleware)
