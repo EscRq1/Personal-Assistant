@@ -5,6 +5,7 @@ import torch
 from enum import Enum
 
 import requests
+from contextlib import contextmanager
 from colorama import Fore
 
 
@@ -14,6 +15,7 @@ class GPUResource(str, Enum):
     OBSERVER = "observer"
     CODER = "coder"
     JINA = "jina"
+    WORKERS = "workers"
 
 
 class ResourceManager:
@@ -21,10 +23,11 @@ class ResourceManager:
     Central owner of GPU-heavy resources.
 
     Invariant:
-        At most one of Assistant, Observer, or Jina owns the GPU
-        at any given time.
+        One assistant, observer, coder, reranker, or parallel worker batch
+        owns the GPU group at a time.
 
-    llama.cpp models are managed through the existing llama.cpp router.
+    Main models use the existing router; workers are independently owned
+    processes reserved as a group through worker_batch().
     Jina is loaded lazily and owned by this manager.
     """
 
@@ -55,6 +58,7 @@ class ResourceManager:
 
         # Jina is intentionally lazy-loaded.
         self._jina = None
+        self._worker_cleanup_failed = False
 
         print(
             f"{Fore.CYAN}"
@@ -432,6 +436,10 @@ class ResourceManager:
                 ) from exc
 
         with self.lock:
+            if self._worker_cleanup_failed:
+                raise RuntimeError("Worker cleanup failed; restart the backend before loading a model")
+            if self.current_owner == GPUResource.WORKERS:
+                raise RuntimeError("Worker batch owns the GPUs")
 
             # ------------------------------------------------------------
             # Router is the source of truth.
@@ -505,6 +513,24 @@ class ResourceManager:
                 )
 
             return self._jina
+
+    @contextmanager
+    def worker_batch(self):
+        """Reserve GPUs for independent worker processes until ALL are reaped.
+
+        Enter from a blocking batch thread. Worker inference does not acquire
+        this lock; other assistant/observer/coder requests remain excluded.
+        """
+        with self.lock:
+            if self._worker_cleanup_failed or self.current_owner == GPUResource.WORKERS:
+                raise RuntimeError("Workers already active or cleanup requires a backend restart")
+            self._release_current()
+            self.current_owner = GPUResource.WORKERS
+            try:
+                yield
+            finally:
+                if not self._worker_cleanup_failed:
+                    self.current_owner = GPUResource.NONE
 
 
 resource_manager = ResourceManager()
