@@ -1,0 +1,15 @@
+{
+  "model": "/media/escrq/New Volume/models/qwen3.6 35b a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+  "max_agents": 4,
+  "max_iterations": 16,
+  "max_tokens": 2048,
+  "startup_timeout": 300,
+  "request_timeout": 300,
+  "batch_timeout": 1800,
+  "workers": [
+    {"gpu": "0", "port": 8091, "cpu_moe_layers": 24, "threads": 6, "context_size": 32768},
+    {"gpu": "1", "port": 8092, "cpu_moe_layers": 24, "threads": 6, "context_size": 32768},
+    {"gpu": "2", "port": 8093, "cpu_moe_layers": 24, "threads": 6, "context_size": 32768},
+    {"gpu": "3", "port": 8094, "cpu_moe_layers": 30, "threads": 6, "context_size": 32768}
+  ]
+}
