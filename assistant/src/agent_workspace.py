@@ -6,6 +6,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from agent_protocol import workspace_path
 
 from sandbox.session import SessionState
 from sandbox.workspace import SKIP_DIRS, _copy_node, _open_directory
@@ -67,19 +68,39 @@ class AgentWorkspaces:
             copy_snapshot(self.parent.workspace, self.original, manager.config, cancel)
         self.before = manifest(self.original)
 
-    def fork(self, name):
+    def fork(self, name, resume_from=None):
         manager = self.manager
+        source = self.original
+        prior = None
+        if resume_from:
+            # References are validated by Assignment; resolve only under THIS chat.
+            import re
+            if not re.fullmatch("[0-9a-f]{32}", resume_from.get("batch_id", "")) or not re.fullmatch(
+                    "agent[1-9][0-9]*", resume_from.get("agent_id", "")):
+                raise ValueError("Invalid resume reference")
+            previous = self.root.parent / resume_from["batch_id"] / resume_from["agent_id"]
+            source = previous / "workspace"
+            fd = _open_directory(source)
+            os.close(fd)
+            prior = json.loads((previous / "result.json").read_text())
+            if prior.get("artifact_error"):
+                raise ValueError("Cannot resume an incomplete artifact snapshot")
         session = manager.create_session(cancel_event=self.cancel)
         self.children.append(session)
         try:
             with manager._session_lock(session):
-                copy_snapshot(self.original, session.workspace, manager.config, self.cancel)
+                copy_snapshot(source, session.workspace, manager.config, self.cancel)
                 baseline = manager.workspaces.path(session.id) / "baseline"
-                copy_snapshot(self.original, baseline, manager.config, self.cancel)
+                copy_snapshot(source, baseline, manager.config, self.cancel)
                 if manager.config.git_enabled:
                     manager._initialize_git(session, self.cancel)
             journal = self.root / name
             journal.mkdir(mode=0o700)
+            if prior is not None:
+                checkpoint(journal / "continuation.json", {
+                    "resume_from": resume_from, "prior_status": prior.get("status"),
+                    "prior_result": prior.get("result", "")[:16000],
+                    "blockers": prior.get("blockers", []), "next_step": prior.get("next_step", "")})
             return session, journal
         except BaseException:
             # Batch cleanup owns every child, including a failed fork.
@@ -105,8 +126,24 @@ class AgentWorkspaces:
             }
             checkpoint(folder / "changes.json", changes)
             result["changes"] = {key: len(value) for key, value in changes.items()}
+            reported = result.get("reported_artifacts", [])
+            missing = [path for path in reported if workspace_path(path) not in after]
+            artifacts = sorted(set(changes["added"] + changes["modified"])
+                               | {p for p in reported if p in after})
+            result["artifacts"] = artifacts[:128]
+            result["artifacts_total"] = len(artifacts)
+            result["artifacts_truncated"] = len(artifacts) > 128
+            if missing:
+                result["blockers"].append(("Reported artifacts missing from final snapshot: " + ", ".join(missing))[:4000])
+                result["stop_reason"] = "missing_artifacts"
+                if result["status"] == "completed":
+                    result["status"] = "partial"
+            result["snapshot_complete"] = True
         except Exception as exc:
             result["artifact_error"] = str(exc)
+            result["snapshot_complete"] = False
+            if result.get("status") == "completed":
+                result["status"] = "partial"
         checkpoint(folder / "result.json", result)
         return result
 
