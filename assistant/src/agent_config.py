@@ -21,9 +21,9 @@ class WorkerSpec:
 class AgentConfig:
     model: Path
     workers: tuple[WorkerSpec, ...]
-    max_agents: int = 4
+    max_agents: int = 2
     max_iterations: int = 16
-    max_tokens: int = 4196
+    max_tokens: int = 2048
     startup_timeout: int = 300
     request_timeout: int = 300
     batch_timeout: int = 1800
