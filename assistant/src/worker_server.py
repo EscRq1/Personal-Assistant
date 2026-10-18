@@ -8,6 +8,7 @@ import socket
 import subprocess
 import threading
 import time
+import json
 
 import requests
 
@@ -57,7 +58,40 @@ class WorkerServer:
                 "--no-context-shift"]
         if s.moe_cache_mib:
             command += ["--moe-cache-mib", str(s.moe_cache_mib)]
+        mtp = self.config.mtp
+        if mtp.enabled:
+            command += ["--spec-type", "draft-mtp", "--spec-draft-n-max", str(mtp.draft_max),
+                        "--spec-draft-n-min", str(mtp.draft_min),
+                        "--spec-draft-type-k", mtp.cache_type_k,
+                        "--spec-draft-type-v", mtp.cache_type_v, "--fit", "off"]
+            if mtp.model is not None:
+                # Without an explicit head model, llama.cpp reuses the target
+                # weights and ignores draft placement options.
+                draft_device = "CUDA1" if mtp.gpu is not None and mtp.gpu != s.gpu else "CUDA0"
+                command += ["--spec-draft-model", str(mtp.model),
+                            "--spec-draft-device", draft_device,
+                            "--spec-draft-ngl", str(mtp.gpu_layers),
+                            "--spec-draft-threads", str(mtp.threads),
+                            "--spec-draft-threads-batch", str(mtp.threads)]
         return command
+
+    def visible_devices(self):
+        mtp = self.config.mtp
+        if mtp.enabled and mtp.model is not None and mtp.gpu is not None and mtp.gpu != self.spec.gpu:
+            return self.spec.gpu + "," + mtp.gpu
+        return self.spec.gpu
+
+    def startup_error(self, message):
+        try:
+            with self.log_path.open("rb") as log:
+                log.seek(0, os.SEEK_END)
+                log.seek(max(0, log.tell() - 4096))
+                detail = log.read().decode("utf-8", errors="replace")
+        except OSError:
+            detail = ""
+        hint = (" MTP requires a compatible llama.cpp build and matching head tensors."
+                if self.config.mtp.enabled else "")
+        return f"{message}; see server.log.{hint}" + ("\n" + detail if detail else "")
 
     def start(self, cancel):
         with self._lock:
@@ -67,10 +101,18 @@ class WorkerServer:
             with socket.socket() as probe:
                 probe.bind(("127.0.0.1", self.spec.port))
             env = {k: v for k, v in os.environ.items() if not k.startswith("LLAMA_ARG_")}
-            env["CUDA_VISIBLE_DEVICES"] = self.spec.gpu
+            env["CUDA_VISIBLE_DEVICES"] = self.visible_devices()
             env["LD_LIBRARY_PATH"] = self.lib_dir + ":" + env.get("LD_LIBRARY_PATH", "")
+            command = self.command()
+            self.log_path.with_name("launch.json").write_text(json.dumps({
+                "command": command, "cuda_visible_devices": self.visible_devices(),
+                "target_gpu": self.spec.gpu, "mtp_enabled": self.config.mtp.enabled,
+                "mtp_gpu": (self.config.mtp.gpu or self.spec.gpu) if self.config.mtp.enabled else None,
+                "mtp_mode": ("separate_head" if self.config.mtp.model else "embedded")
+                    if self.config.mtp.enabled else "disabled",
+            }, indent=2) + "\n")
             with self.log_path.open("wb") as log:
-                self.process = subprocess.Popen(self.command(), env=env, stdin=subprocess.DEVNULL,
+                self.process = subprocess.Popen(command, env=env, stdin=subprocess.DEVNULL,
                                                 stdout=log, stderr=subprocess.STDOUT,
                                                 start_new_session=True)
         deadline = time.monotonic() + self.config.startup_timeout
@@ -80,7 +122,7 @@ class WorkerServer:
                 if cancel.is_set():
                     raise RuntimeError("Worker startup cancelled")
                 if self.process.poll() is not None:
-                    raise RuntimeError(f"Worker exited with code {self.process.returncode}; see server.log")
+                    raise RuntimeError(self.startup_error(f"Worker exited with code {self.process.returncode}"))
                 try:
                     with http.get(self.url + "/health", timeout=1) as response:
                         if response.status_code == 200:
@@ -88,7 +130,7 @@ class WorkerServer:
                 except requests.RequestException:
                     pass
                 cancel.wait(0.1)
-        raise TimeoutError("Worker startup timed out; see server.log")
+        raise TimeoutError(self.startup_error("Worker startup timed out"))
 
     def stop(self):
         # Mark stopped even if a cancellation races startup.
@@ -110,7 +152,7 @@ class WorkerServer:
             with _servers_lock:
                 _servers.discard(self)
 
-    def complete(self, messages, tools, cancel, max_tokens):
+    def complete(self, messages, tools, cancel, max_tokens, on_progress=None):
         payload = {"model": "worker", "messages": messages, "tools": tools,
                    "tool_choice": "auto", "parallel_tool_calls": False,
                    "stream": True, "cache_prompt": True, "temperature": 0.6,
@@ -123,6 +165,8 @@ class WorkerServer:
             with http.post(self.url + "/v1/chat/completions", json=payload,
                            stream=True, timeout=(5, self.config.request_timeout)) as response:
                 response.raise_for_status()
+                if on_progress:
+                    on_progress()
                 for raw in response.iter_lines():
                     if cancel.is_set():
                         raise RuntimeError("Worker cancelled")
@@ -131,6 +175,8 @@ class WorkerServer:
                         raise ValueError("Worker response exceeded byte limit")
                     if not raw.startswith(b"data:"):
                         continue
+                    if on_progress:
+                        on_progress()
                     data = raw[5:].strip()
                     if data == b"[DONE]":
                         break
