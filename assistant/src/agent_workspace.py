@@ -50,6 +50,27 @@ def checkpoint(path, data):
     temporary.replace(path)
 
 
+def live_preview(manager, session, relative_path, cancel):
+    """Read a trusted frozen copy at an idle tool boundary; never block a live tool."""
+    import tempfile
+    path = workspace_path(relative_path)
+    lock = manager._session_lock(session)
+    if not lock.acquire(blocking=False):
+        return {"busy": True, "note": "Sandbox tool is active; use progress or interrupt_worker for a final checkpoint."}
+    try:
+        if session.state != SessionState.READY:
+            return {"busy": True, "note": "Sandbox is not ready for a safe file view."}
+        manager.workspaces.validate(session.id, session.workspace)
+        with tempfile.TemporaryDirectory(prefix="preview-", dir=manager.workspaces.path(session.id)) as folder:
+            copy_snapshot(session.workspace, Path(folder), manager.config, cancel)
+            with (Path(folder) / path).open("rb") as stream:
+                data = stream.read(12001)
+            return {"busy": False, "path": path, "content": data[:12000].decode("utf-8", "replace"),
+                    "truncated": len(data) > 12000, "view": "safe snapshot at an idle tool boundary"}
+    finally:
+        lock.release()
+
+
 def merge_snapshot(manager, session, base, source, cancel):
     """Three-way file merge in a trusted staging tree; publish only without conflicts.
 

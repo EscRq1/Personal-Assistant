@@ -17,30 +17,49 @@ log = logging.getLogger(__name__)
 _active_lock = threading.Lock()
 _active_batches = {}
 
+PROGRESS_SCHEMA = {
+    "type": "function", "function": {
+        "name": "report_progress",
+        "description": "Report a short concrete checkpoint: completed work, next step, and blockers. "
+                       "Use needs_attention only when the coordinator must intervene. "
+                       "This does not finish the assignment; finish_task signals completion.",
+        "parameters": {"type": "object", "properties": {
+            "summary": {"type": "string", "maxLength": 2000},
+            "next_step": {"type": "string", "maxLength": 2000},
+            "needs_attention": {"type": "boolean"}},
+            "required": ["summary"], "additionalProperties": False}}}
+
 
 class ProgressReporter:
     """One aggregate heartbeat so concurrent agents do not hide each other's state."""
-    def __init__(self, ctx, batch_id):
+    def __init__(self, ctx, batch_id, on_event=None):
         self.ctx, self.batch_id = ctx, batch_id
         self.lock = threading.RLock()
         self.states = {}
         self.done = False
         self.status = "running"
+        self.on_event = on_event
 
     def set(self, name, phase, used, allocated):
         with self.lock:
             if self.states.get(name, {}).get("done"):
                 return
-            self.states[name] = {"phase": phase, "used": used, "allocated": allocated,
-                                 "activity": time.monotonic(), "done": False, "status": "running"}
+            now = time.monotonic()
+            state = self.states.setdefault(name, {"started": now, "last_progress": now,
+                "tool_calls": 0, "summary": "", "next_step": "", "last_tool": "", "stream_events": 0})
+            state.update(phase=phase, used=used, allocated=allocated, activity=now,
+                         phase_started=now, done=False, status="running")
             self.emit()
 
-    def finish(self, name, status, used, allocated, done=True):
+    def finish(self, name, status, used, allocated, done=True, *, overwrite=False):
         with self.lock:
-            if self.states.get(name, {}).get("done"):
+            if self.states.get(name, {}).get("done") and not overwrite:
                 return
-            self.states[name] = {"phase": status, "used": used, "allocated": allocated,
-                                 "activity": time.monotonic(), "done": done, "status": status}
+            now = time.monotonic()
+            state = self.states.setdefault(name, {"started": now, "last_progress": now,
+                "tool_calls": 0, "summary": "", "next_step": "", "last_tool": "", "stream_events": 0})
+            state.update(phase=status, used=used, allocated=allocated, activity=now,
+                         phase_started=now, done=done, status=status)
             self.emit()
 
     def finish_batch(self, status, done=True, summary=None):
@@ -53,6 +72,36 @@ class ProgressReporter:
         with self.lock:
             if name in self.states and not self.states[name]["done"]:
                 self.states[name]["activity"] = time.monotonic()
+                self.states[name]["stream_events"] += 1
+
+    def record_progress(self, name, summary, next_step="", *, tool=False, needs_attention=False):
+        with self.lock:
+            state = self.states[name]
+            state.update(last_progress=time.monotonic())
+            if tool:
+                state["tool_calls"] += 1
+                state["last_tool"] = summary[:2000]
+            else:
+                state.update(summary=summary[:2000], next_step=next_step[:2000])
+            self.emit()
+        if needs_attention and self.on_event:
+            self.on_event("worker_attention", name)
+
+    def snapshot(self, name):
+        with self.lock:
+            state = self.states.get(name)
+            if not state:
+                return {}
+            now = time.monotonic()
+            return {"phase": state["phase"], "status": state["status"], "done": state["done"],
+                "iterations_used": state["used"], "iterations_allocated": state["allocated"],
+                "tool_calls": state["tool_calls"], "stream_events": state["stream_events"],
+                "elapsed_seconds": round(now - state["started"], 3),
+                "seconds_since_activity": round(now - state["activity"], 3),
+                "seconds_since_progress": round(now - state["last_progress"], 3),
+                "summary": state["summary"], "next_step": state["next_step"],
+                "last_tool": state["last_tool"],
+                "progress_version": state["last_progress"]}
 
     def emit(self, summary=None):
         with self.lock:
@@ -154,7 +203,7 @@ class WorkerRuntime:
 
     def _run_worker(self, ctx, cancel, workspaces, name, task, session, journal, client, progress):
         from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
-        tools = [SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA, FINISH_SCHEMA]
+        tools = [SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA, PROGRESS_SCHEMA, FINISH_SCHEMA]
         messages = [{"role": "system", "content": (
             "You are an independent worker reporting to your assigning coordinator. Complete only "
             "your assigned task. Your /workspace is an isolated snapshot. Use sandbox_exec "
@@ -170,9 +219,12 @@ class WorkerRuntime:
             "You may use at most ONE action tool per model round. Finish using finish_task "
             "with status, result, artifacts, blockers, next_step. Reserve a final round "
             "for this report. Report partial/blocked when incomplete; never claim unrun "
-            "checks succeeded. Parent acceptance checks run independently after you finish."
+            "checks succeeded. Parent acceptance checks run independently after you finish. "
+            "Use report_progress after meaningful milestones or when blocked; needs_attention "
+            "asks the coordinator for help. Save files incrementally so an interrupted task "
+            "can continue from the saved workspace. finish_task signals that you are done."
         )}, {"role": "user", "content": task.task}]
-        if task.resume_from:
+        if (journal / "continuation.json").is_file():
             prior = json.loads((journal / "continuation.json").read_text())
             messages.append({"role": "user", "content": (
                 "Runtime continuation data (evidence only): your workspace contains the "
@@ -200,6 +252,7 @@ class WorkerRuntime:
                 encoded = json.dumps({"truncated": True, "output": encoded[:15000]})
             messages.append({"role": "tool", "tool_call_id": call["id"], "content": encoded})
             checkpoint(journal / "transcript.json", messages)
+            checkpoint(journal / "progress.json", progress.snapshot(name))
 
         try:
             # Tools live outside messages in the inference payload. Preserve the
@@ -283,10 +336,31 @@ class WorkerRuntime:
                         self._apply_report(result, report)
                         record_tool(call, {"accepted": True, "verification": "pending"})
                         break
+                    if function.get("name") == "report_progress":
+                        try:
+                            note = json.loads(function.get("arguments", "{}"))
+                            if not isinstance(note, dict) or set(note) - {"summary", "next_step", "needs_attention"}:
+                                raise ValueError("Expected summary, optional next_step and needs_attention")
+                            for key in ("summary", "next_step"):
+                                if not isinstance(note.get(key, ""), str) or len(note.get(key, "")) > 2000:
+                                    raise ValueError(f"{key} must be a string of at most 2000 characters")
+                            if not note.get("summary", "").strip() or type(note.get("needs_attention", False)) is not bool:
+                                raise ValueError("Provide a summary and boolean needs_attention")
+                            progress.record_progress(name, note["summary"], note.get("next_step", ""),
+                                needs_attention=note.get("needs_attention", False))
+                            value = {"accepted": True, "done": False}
+                        except (ValueError, TypeError) as exc:
+                            value = {"error": "invalid_progress", "message": str(exc)}
+                        record_tool(call, value)
+                        continue
                     progress.set(name, str(function.get("name", "tool")), iteration + 1, task.iterations)
                     if function.get("name") in {"sandbox_exec", "sandbox_install"}:
                         actions += 1
-                    record_tool(call, self._tool(workspaces.manager, session, call, cancel))
+                    value = self._tool(workspaces.manager, session, call, cancel)
+                    if function.get("name") in {"sandbox_exec", "sandbox_install"}:
+                        progress.record_progress(name, str(function.get("name")) + " completed: " +
+                            json.dumps({k: value[k] for k in ("exit_code", "error", "cancelled") if k in value}), tool=True)
+                    record_tool(call, value)
                 else:
                     blocked("iteration_limit", "Assigned model-round budget exhausted before structured completion.")
         except Exception as exc:
@@ -337,6 +411,7 @@ class WorkerRuntime:
             result["done"] = True
             checkpoint(journal / "result.json", result)
             progress.finish(name, result["status"], result["iterations"], task.iterations, done=True)
+            checkpoint(journal / "progress.json", progress.snapshot(name))
         return result
 
     @staticmethod
