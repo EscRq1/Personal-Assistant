@@ -75,9 +75,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         from agent_runtime import shutdown_delegations
-        from worker_server import stop_worker_servers
         drained = await asyncio.to_thread(shutdown_delegations, 30)
-        await asyncio.to_thread(stop_worker_servers)
         if not drained:
             print("[AGENTS] Shutdown cancelled workers; sandbox cleanup is still draining.")
 
