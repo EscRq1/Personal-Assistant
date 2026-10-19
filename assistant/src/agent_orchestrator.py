@@ -10,9 +10,11 @@ import logging
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import ThreadPoolExecutor, wait
 from copy import deepcopy
 from dataclasses import dataclass, asdict
+from collections import deque
+from statistics import median
 
 from agent_protocol import TASK_SCHEMA
 from agent_protocol import assignment, completion, FINISH_SCHEMA, validate_checks, run_checks, workspace_path
@@ -77,13 +79,22 @@ def orchestrator_tools(config):
                      "assignment": task,
                      "source_task": {"type": "string", "description": "Optional finished task ID, e.g. agent1"}},
                  ("assignment",)),
-        function("workers_status", "Collect current statuses and completed reports. wait_seconds waits "
-                 "for ANY running worker to finish, not for the whole pool. Use a bounded wait when "
-                 "nothing else can be done; idle workers can receive new tasks immediately.", {
-                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 30}}),
-        function("inspect_worker", "Read a finished task's immutable result snapshot. Omit path for "
-                 "its file listing and changes; supply a relative file path for up to 12000 bytes. "
-                 "Inspect evidence before integrating. Live worker files are never shared for writing.", {
+        function("workers_status", "Wait efficiently for verified worker completion, an attention request, "
+                 "or a slow/no-progress alert. Omit wait_seconds for the operator's long default wait; "
+                 "workers wake it immediately when done. No model inference runs while waiting. "
+                 "Review completed results and reassign idle workers when useful work remains.", {
+                     "wait_seconds": {"type": "integer", "minimum": 0,
+                                      "maximum": config.orchestrator.status_wait_seconds}}),
+        function("interrupt_worker", "Stop one running assignment, drain its inference/tools, and save "
+                 "its partial workspace and progress. Do not cancel the mission. Once snapshot_complete "
+                 "is true, continue or split its remaining work using delegate_worker(source_task=task_id). "
+                 "A pending interruption is not yet safe to fork; wait for worker_done.", {
+                     "task_id": {"type": "string"}, "reason": {"type": "string", "maxLength": 2000}},
+                 ("task_id", "reason")),
+        function("inspect_worker", "Inspect live timing, phase, tool progress, and reported milestones. "
+                 "For a finished task, omit path for its immutable file listing and changes. Supply a "
+                 "relative path for up to 12000 bytes. Live file reads use a safe snapshot only when "
+                 "the sandbox is idle; a busy sandbox returns progress without blocking.", {
                      "task_id": {"type": "string"}, "path": {"type": "string"}}, ("task_id",)),
         function("collect_worker", "Review a finished result. integrate merges its file changes into "
                  "your candidate only when no conflicting edits exist. reference or discard records "
@@ -104,7 +115,10 @@ class OrchestratedBatch(WorkerRuntime):
     def _run(self, ctx, mission):
         from sandbox_tools import get_manager
         batch_id = uuid.uuid4().hex
-        progress = ProgressReporter(ctx, batch_id)
+        self._condition = threading.Condition()
+        self._events = deque(maxlen=256)
+        self._event_sequence = 0
+        progress = ProgressReporter(ctx, batch_id, on_event=self._notify)
         cancel = BatchCancellation(ctx.cancel_event)
         workspaces = None
         self.workspaces = None
@@ -112,6 +126,7 @@ class OrchestratedBatch(WorkerRuntime):
         self.tasks, self.slots = {}, {}
         self.task_sequence = 0
         self.pool = None
+        self._closing = False
         self.integration = None
         self.final_checks = []
         preflight = []
@@ -122,6 +137,7 @@ class OrchestratedBatch(WorkerRuntime):
         self.coordinator_used = 0
         clients, cleanup_errors = [], []
         clients_lock = threading.Lock()
+        self._clients, self._clients_lock = clients, clients_lock
         ended, timed_out = threading.Event(), threading.Event()
         deadline = time.monotonic() + self.config.batch_timeout
         status, error = "partial", None
@@ -193,6 +209,7 @@ class OrchestratedBatch(WorkerRuntime):
                         self._coordinate(coordinator)
                     status = self.coordinator_report["status"]
                 finally:
+                    self._closing = True
                     # The coordinator cannot return the GPU lease while worker
                     # commands or model generations are still alive.
                     if self._running():
@@ -295,6 +312,91 @@ class OrchestratedBatch(WorkerRuntime):
         return [item["future"] for item in self.tasks.values()
                 if item.get("future") is not None and not item["future"].done()]
 
+    def _notify(self, kind, task_id):
+        # Worker threads signal a condition; only the coordinator mutates the board.
+        with self._condition:
+            self._event_sequence += 1
+            self._events.append({"id": self._event_sequence, "type": kind, "task_id": task_id})
+            self._condition.notify_all()
+
+    def _health(self, item, task_id):
+        if item.get("result") is not None or item.get("interrupt_reason"):
+            return {"flags": []}
+        state = self.progress.snapshot(task_id)
+        policy = self.config.orchestrator
+        durations = [entry["result"].get("duration_seconds", 0) for entry in self.tasks.values()
+                     if entry.get("result") and entry["result"]["status"] == "completed"
+                     and entry["result"].get("duration_seconds", 0) > 0]
+        reference = median(durations) if durations else None
+        threshold = max(policy.slow_task_seconds, (reference or 0) * policy.slow_task_factor)
+        flags = []
+        if policy.slow_task_seconds > 0 and state.get("elapsed_seconds", 0) >= threshold:
+            flags.append("long_running")
+        if policy.no_progress_seconds > 0 and state.get("seconds_since_progress", 0) >= policy.no_progress_seconds:
+            flags.append("no_tool_or_report_progress")
+        return {"flags": flags, "completed_task_median_seconds": reference,
+                "slow_threshold_seconds": threshold,
+                "note": "Elapsed time is a warning; compare task complexity and inspect progress before interrupting."}
+
+    def _scan_health(self):
+        for task_id, item in self.tasks.items():
+            flags = self._health(item, task_id)["flags"]
+            progress_version = (self.progress.snapshot(task_id).get("progress_version")
+                                if "no_tool_or_report_progress" in flags else None)
+            version = (progress_version, tuple(flags))
+            previous = item.get("health_version")
+            previous_flags = set(previous[1]) if previous else set()
+            # Continued useful work on an already-long task must not keep
+            # waking the coordinator after every completed tool.
+            alert = bool(set(flags) - previous_flags) or (
+                "no_tool_or_report_progress" in flags and previous is not None and previous[0] != progress_version)
+            item["health_version"] = version
+            if alert:
+                self._notify("worker_health", task_id)
+
+    def _wait_events(self, seconds):
+        deadline = None if seconds is None else time.monotonic() + seconds
+        while True:
+            self._harvest()
+            self._scan_health()
+            with self._condition:
+                if self._events:
+                    events = list(self._events)
+                    self._events.clear()
+                    with (self.journal / "events.jsonl").open("a", encoding="utf-8") as journal:
+                        for event in events:
+                            journal.write(json.dumps(event) + "\n")
+                    return events, False
+                if self.cancel.is_set() or not self._running():
+                    return [], False
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return [], True
+                interval = max(0.05, self.config.orchestrator.supervision_interval)
+                self._condition.wait(interval if remaining is None else min(interval, remaining))
+
+    def _interrupt(self, arguments):
+        if set(arguments) - {"task_id", "reason"}:
+            raise ValueError("Unknown interrupt_worker arguments")
+        task_id, reason = arguments.get("task_id"), arguments.get("reason")
+        if not isinstance(task_id, str) or task_id not in self.tasks:
+            raise ValueError("Unknown task_id")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+            raise ValueError("Provide an interruption reason of at most 2000 characters")
+        self._harvest()
+        item = self.tasks[task_id]
+        if item.get("result") is None:
+            item["interrupt_reason"] = reason
+            item["cancel"].set()
+            self.slots[item["worker_id"]]["client"].close()
+            wait([item["future"]], timeout=max(0, self.config.orchestrator.interrupt_timeout))
+            self._harvest()
+        self._checkpoint_board()
+        return {"task_id": task_id, "pending": item.get("result") is None,
+                "snapshot_complete": bool((item.get("result") or {}).get("snapshot_complete")),
+                "result": item.get("result"),
+                "next_step": "Inspect the saved state; delegate smaller remaining tasks with source_task."}
+
     def _harvest(self):
         for task_id, item in self.tasks.items():
             future = item.get("future")
@@ -309,8 +411,31 @@ class OrchestratedBatch(WorkerRuntime):
             item["result"] = result
             slot = self.slots[item["worker_id"]]
             slot["task_id"] = None
-            if getattr(slot["client"], "failed", False):
+            if item.get("interrupt_reason"):
+                if result["status"] == "cancelled" and not self.cancel.is_set():
+                    result.update(status="partial", stop_reason="interrupted",
+                                  next_step="Continue or split remaining work from this saved snapshot.")
+                result["interruption_reason"] = item["interrupt_reason"]
+                # An aborted socket is never reused until the physical slot is
+                # observably idle. Failed drain disables this slot, not its siblings.
                 slot["unavailable"] = True
+                if not self.cancel.is_set() and not self._closing:
+                    previous = slot["client"]
+                    try:
+                        previous.wait_idle(self.cancel, self.config.shared_model.drain_timeout)
+                        log_path = self.workspaces.root / task_id / "replacement-client.log"
+                        replacement = self.client_factory(self.config, previous.spec, log_path,
+                                                          router_url=self.resources.router_url)
+                        with self._clients_lock:
+                            self._clients.append(replacement)
+                        replacement.attach(self.cancel)
+                        slot.update(client=replacement, unavailable=False)
+                    except Exception as exc:
+                        result["slot_recovery_error"] = str(exc)[:2000]
+            elif getattr(slot["client"], "failed", False):
+                slot["unavailable"] = True
+            self.progress.finish(task_id, result["status"], result.get("iterations", 0),
+                                 item["assignment"].iterations, overwrite=True)
             checkpoint(self.workspaces.root / task_id / "result.json", result)
 
     def _board(self, detailed=False):
@@ -330,11 +455,17 @@ class OrchestratedBatch(WorkerRuntime):
             "tasks": {task_id: {"worker_id": item["worker_id"],
                 "status": item["result"]["status"] if item.get("result") else "running",
                 "task": item["assignment"].task if detailed else item["assignment"].task[:300],
+                "progress": self.progress.snapshot(task_id), "health": self._health(item, task_id),
+                "interruption_requested": bool(item.get("interrupt_reason")),
                 "disposition": (item.get("disposition") if detailed or not item.get("disposition") else {
                     "action": item["disposition"]["action"], "reason": item["disposition"]["reason"][:200]}),
                 "report": report(item)}
                 for task_id, item in self.tasks.items()},
-            "tasks_remaining": self.config.orchestrator.max_tasks - len(self.tasks)}
+            "tasks_remaining": self.config.orchestrator.max_tasks - len(self.tasks),
+            "idle_workers": [name for name, slot in self.slots.items()
+                             if slot["task_id"] is None and not slot.get("unavailable")],
+            "needs_review": [name for name, item in self.tasks.items()
+                             if item.get("result") is not None and item.get("disposition") is None]}
 
     def _checkpoint_board(self):
         if self.workspaces is not None:
@@ -401,15 +532,26 @@ class OrchestratedBatch(WorkerRuntime):
                         merge_base[path] = inherited[path]
                     else:
                         merge_base.pop(path, None)
+        if prior:
+            checkpoint(journal / "continuation.json", {
+                "source_task": source_task, "prior_status": prior["result"].get("status"),
+                "prior_result": prior["result"].get("result", "")[:16000],
+                "blockers": prior["result"].get("blockers", []),
+                "next_step": prior["result"].get("next_step", ""),
+                "prior_assignment": asdict(prior["assignment"]),
+                "progress": self.progress.snapshot(source_task),
+                "instruction": "Continue from these saved files; do not restart completed work."})
         checkpoint(journal / "assignment.json", asdict(task))
         checkpoint(journal / "merge_base.json", merge_base)
         slot["task_id"] = task_id
         entry = {"worker_id": worker_id, "session": session, "result": None,
-                 "disposition": None, "future": None, "assignment": task, "merge_base": merge_base}
+                 "disposition": None, "future": None, "assignment": task, "merge_base": merge_base,
+                 "cancel": BatchCancellation(self.cancel), "health_version": None}
         self.tasks[task_id] = entry
         self.progress.set(task_id, "queued", 0, task.iterations)
-        entry["future"] = self.pool.submit(self._run_worker, self.ctx, self.cancel, self.workspaces,
+        entry["future"] = self.pool.submit(self._run_worker, self.ctx, entry["cancel"], self.workspaces,
             task_id, task, session, journal, slot["client"], self.progress)
+        entry["future"].add_done_callback(lambda future: self._notify("worker_done", task_id))
         self._checkpoint_board()
         return {"accepted": True, "task_id": task_id, "worker_id": worker_id, "iterations": task.iterations,
                 "source": source_task or ("resume_from" if task.resume_from else "integrated_candidate")}
@@ -428,13 +570,25 @@ class OrchestratedBatch(WorkerRuntime):
         if set(arguments) - {"task_id", "path"}:
             raise ValueError("Unknown inspect_worker arguments")
         task_id = arguments.get("task_id")
-        item = self._finished(task_id)
+        if not isinstance(task_id, str) or task_id not in self.tasks:
+            raise ValueError("Unknown task_id")
+        self._harvest()
+        item = self.tasks[task_id]
+        if item.get("result") is None:
+            view = {"task_id": task_id, "running": True,
+                    "progress": self.progress.snapshot(task_id), "health": self._health(item, task_id)}
+            if arguments.get("path") is not None:
+                from agent_workspace import live_preview
+                view.update(live_preview(self.workspaces.manager, item["session"], arguments["path"], self.cancel))
+            return view
+        item["status_seen"] = True
         if not item["result"].get("snapshot_complete"):
             raise ValueError("Task has no complete safe snapshot")
         folder = self.workspaces.root / task_id
         source = folder / "workspace"
         if arguments.get("path") is None:
             return {"result": item["result"], "files": list(manifest(source)),
+                    "assignment": asdict(item["assignment"]), "progress": self.progress.snapshot(task_id),
                     "changes": json.loads((folder / "changes.json").read_text())}
         path = workspace_path(arguments["path"])
         # Only backend-created immutable snapshots are read on the host.
@@ -474,27 +628,25 @@ class OrchestratedBatch(WorkerRuntime):
     def _status(self, arguments):
         if set(arguments) - {"wait_seconds"}:
             raise ValueError("Unknown workers_status arguments")
-        seconds = arguments.get("wait_seconds", 0)
-        if type(seconds) is not int or not 0 <= seconds <= 30:
-            raise ValueError("wait_seconds must be an integer between 0 and 30")
+        seconds = arguments.get("wait_seconds", self.config.orchestrator.status_wait_seconds)
+        if type(seconds) is not int or not 0 <= seconds <= self.config.orchestrator.status_wait_seconds:
+            raise ValueError("wait_seconds must be between 0 and orchestrator.status_wait_seconds")
         self._harvest()
-        # A completed report not yet collected through a status/read tool is an
-        # immediate event. Do not wait for slower workers when useful work has
-        # already arrived, even if the model requested a long wait.
+        self.progress.set("orchestrator", "waiting for worker events", self.coordinator_used,
+                          self.config.orchestrator.max_iterations)
         unreported = any(item.get("result") is not None and not item.get("status_seen")
                          for item in self.tasks.values())
-        running = [] if unreported else self._running()
-        deadline = time.monotonic() + seconds
-        while running and not self.cancel.is_set() and time.monotonic() < deadline:
-            finished, _ = wait(running, timeout=max(0, min(0.05, deadline - time.monotonic())), return_when=FIRST_COMPLETED)
-            if finished:
-                break
+        events, timed_out = self._wait_events(0 if unreported else seconds)
         self._harvest()
         for item in self.tasks.values():
             if item.get("result") is not None:
                 item["status_seen"] = True
         self._checkpoint_board()
-        return self._board()
+        board = self._board()
+        return {**board, "events": events, "wait_timed_out": timed_out,
+                "next_action": ("Inspect and collect completed results; reassign idle workers if useful work remains."
+                                if board["needs_review"] else
+                                "Inspect any health/attention alert before deciding to interrupt or continue.")}
 
     def _finish(self, arguments):
         report = completion(arguments)
@@ -555,7 +707,13 @@ class OrchestratedBatch(WorkerRuntime):
         limit = self.config.orchestrator.max_iterations
         self.coordinator_messages = [{"role": "system", "content": (
             "You coordinate a resident worker pool and own the integrated /workspace candidate. "
-            "The main assistant is waiting and will judge your final deliverable. Decompose the "
+            "The main assistant is waiting and will judge your final deliverable. Health alerts are "
+            "suspicions, not proof of failure: compare task complexity, tool progress, and elapsed time. "
+            "If a worker is stuck, inspect it, call interrupt_worker to stop just that assignment, "
+            "and wait for its complete saved snapshot. Decompose its remaining work into smaller "
+            "assignments and call delegate_worker(source_task=the interrupted task) for each, "
+            "reusing idle slots. All children inherit the files and progress journal; assign disjoint "
+            "edits and integrate carefully. Never clone a still-running mutable workspace. Decompose the "
             "mission, delegate bounded tasks concurrently, inspect their evidence, and integrate "
             "useful changes. Begin by calling delegate_worker with a concrete first assignment; "
             "keep decomposition brief and fill other idle workers in subsequent rounds when tasks "
@@ -566,7 +724,8 @@ class OrchestratedBatch(WorkerRuntime):
             "the current candidate. Worker IDs (worker1 etc.) are reusable model slots; task IDs "
             "(agent1 etc.) identify separate saved assignments. Reassign idle slots while other "
             "workers run; do not wait for the whole pool. workers_status reports all states and "
-            "can wait for any completion. inspect_worker reads immutable completed snapshots. "
+            "sleeps until a verified completion, attention request, or health alert. Use its default long wait; "
+            "no inference runs during the wait. inspect_worker can read live progress and safe file views. "
             "collect_worker integrates a snapshot with conflict detection, or records a reason "
             "for reference/discard. Never assume independent branches are already combined. "
             "Your sandbox_exec/install tools operate on the integrated candidate; use them to "
@@ -583,17 +742,28 @@ class OrchestratedBatch(WorkerRuntime):
         checkpoint(self.journal / "tool_schemas.json", tools)
         recovery = 0
         finished = False
+        park_before_next = False
         for index in range(limit):
             if self.cancel.is_set():
                 break
             self._harvest()
+            self._scan_health()
+            wake_events = []
+            if park_before_next and self._running():
+                self.progress.set("orchestrator", "sleeping until worker event", index + 1, limit)
+                wake_events, _ = self._wait_events(None)
+            if self.cancel.is_set():
+                break
+            park_before_next = False
             self._checkpoint_board()
             if len(json.dumps(self.coordinator_messages).encode()) > self.config.max_transcript_bytes:
                 self.coordinator_report["blockers"].append("Coordinator transcript byte limit reached.")
                 break
             remaining = limit - index
             note = {"round": index + 1, "rounds_allocated": limit, "rounds_remaining": remaining,
-                    "scheduler": self._board()}
+                    "scheduler": self._board(), "wake_events": wake_events}
+            if self._board()["needs_review"]:
+                note["instruction"] = "Finished results need review. Inspect/collect them, then reassign idle workers if useful work remains; harvesting alone does not dispatch work."
             if not self.tasks:
                 note["instruction"] = "No worker has been dispatched. Call delegate_worker now, or finish_task with a concrete blocker if delegation is impossible."
             if remaining == 1:
@@ -661,6 +831,9 @@ class OrchestratedBatch(WorkerRuntime):
                             value = self._dispatch(args)
                         elif name == "workers_status":
                             value = self._status(args)
+                            park_before_next = bool(value.get("wait_timed_out")) and not value["needs_review"]
+                        elif name == "interrupt_worker":
+                            value = self._interrupt(args)
                         elif name == "inspect_worker":
                             value = self._inspect(args)
                         elif name == "collect_worker":

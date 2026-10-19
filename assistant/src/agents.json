@@ -12,7 +12,7 @@
   "enable_thinking": true,
   "reasoning_effort": "low",
   "request_timeout": 300,
-  "batch_timeout": 1800,
+  "batch_timeout": 3600,
   "max_transcript_bytes": 16000000,
   "workers": [
     {
@@ -35,6 +35,12 @@
     "max_tasks": 24,
     "max_tokens": -1,
     "enable_thinking": true,
-    "reasoning_effort": "medium"
+    "reasoning_effort": "medium",
+    "status_wait_seconds": 180,
+    "supervision_interval": 5,
+    "slow_task_seconds": 300,
+    "slow_task_factor": 3.0,
+    "no_progress_seconds": 180,
+    "interrupt_timeout": 30
   }
 }

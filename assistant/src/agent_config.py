@@ -64,12 +64,22 @@ class OrchestratorConfig:
     max_tokens: int = -1
     enable_thinking: bool = True
     reasoning_effort: str = "medium"
+    status_wait_seconds: int = 180
+    supervision_interval: int = 5
+    slow_task_seconds: int = 300
+    slow_task_factor: float = 3.0
+    no_progress_seconds: int = 180
+    interrupt_timeout: int = 30
 
     @classmethod
     def load(cls, raw):
         value = cls(**object_values(raw, cls, "orchestrator"))
         validate_slot(value, "orchestrator")
-        integers(value, ("max_iterations", "max_tasks", "max_tokens"), "orchestrator")
+        integers(value, ("max_iterations", "max_tasks", "max_tokens", "status_wait_seconds",
+                         "supervision_interval", "slow_task_seconds", "no_progress_seconds",
+                         "interrupt_timeout"), "orchestrator")
+        if type(value.slow_task_factor) not in (int, float):
+            raise ValueError("orchestrator.slow_task_factor must be numeric")
         inference_policy(value, "orchestrator")
         return value
 
@@ -134,43 +144,26 @@ DELEGATE_SCHEMA = {
     "function": {
         "name": "delegate_to_subagents",
         "description": (
-            "Hand a complete mission to the coordinator on the existing shared assistant model. "
-            "Include all requirements, relevant context, and optional preflight and acceptance checks. "
-            "The coordinator decides how to decompose the mission and how many available workers "
-            "to use concurrently, within the operator-configured capacity. It selects iteration "
-            "budgets, reassigns idle workers, reviews results, integrates a separate candidate, "
-            "and verifies the deliverable. Do not prescribe worker counts or individual assignments. "
-            "Model weights remain loaded while you wait. Resume as final judge: inspect "
-            "candidate_workspace, verification, reports, and blockers before adopting the candidate. "
-            "Original files are not auto-overwritten. Agents cannot call the coder, browse, "
-            "or access memory. Call one control tool at a time."
+            "Hand a complete mission to a coordinator and concurrent worker conversations on the existing "
+            "shared assistant model. Pass task with all requirements and context and optional preflight and "
+            "acceptance checks. The coordinator chooses concurrency within the operator's worker capacity, "
+            "worker iteration budgets, reassigns idle slots, reviews results, integrates a separate candidate, "
+            "and verifies the deliverable. Model weights remain loaded while you wait. Resume as final judge: "
+            "inspect candidate_workspace, verification, reports, and blockers before adopting the candidate. "
+            "Original files are not auto-overwritten. Agents cannot call the coder, browse, or access memory. "
+            "Call one control tool at a time."
         ),
         "parameters": {
-            "type": "object",
-            "properties": {
-                "task": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": 16000,
-                },
-                "preflight": {
-                    "type": "array",
-                    "maxItems": 8,
-                    "items": CHECK_SCHEMA,
-                },
-                "acceptance": {
-                    "type": "array",
-                    "maxItems": 8,
-                    "items": CHECK_SCHEMA,
-                },
-                "summary": {"type": "string"},
-            },
-            "required": ["task"],
-            "additionalProperties": False,
-        },
-    },
+            "type": "object", "properties": {
+                "task": {"type": "string", "minLength": 1, "maxLength": 16000},
+                "preflight": {"type": "array", "maxItems": 8, "items": CHECK_SCHEMA},
+                "acceptance": {"type": "array", "maxItems": 8, "items": CHECK_SCHEMA},
+                "summary": {"type": "string"}},
+            "required": ["task"], "additionalProperties": False}
+    }
 }
 
+
 def configured_delegate_schema():
-    """The main assistant submits a mission; worker capacity is operator-owned."""
+    """Always expose the mission interface, even if operator config needs fixing."""
     return deepcopy(DELEGATE_SCHEMA)

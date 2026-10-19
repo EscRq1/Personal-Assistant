@@ -11,8 +11,9 @@ import http.client
 import json
 import socket
 import threading
+import time
 import uuid
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlencode
 from agent_config import OrchestratorConfig
 
 _clients = set()
@@ -62,6 +63,35 @@ class SharedModelClient:
             connection.close()
         with _registry_lock:
             _clients.discard(self)
+
+    def wait_idle(self, cancel, timeout):
+        """Confirm this physical slot drained before replacing an interrupted client."""
+        parts = urlsplit(self.url)
+        connection_type = http.client.HTTPSConnection if parts.scheme == "https" else http.client.HTTPConnection
+        deadline = time.monotonic() + timeout
+        while not cancel.is_set():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("Interrupted shared slot did not drain; it cannot be reused")
+            connection = connection_type(parts.hostname, parts.port, timeout=min(5, remaining))
+            try:
+                path = parts.path.rstrip("/") + "/slots?" + urlencode({"model": self.model})
+                connection.request("GET", path)
+                response = connection.getresponse()
+                if response.status != 200:
+                    raise RuntimeError(f"Slot drain check HTTP {response.status}")
+                slots = json.loads(response.read())
+                if isinstance(slots, dict):
+                    slots = slots.get("slots", slots.get("data"))
+                slot = next((s for s in slots if s.get("id") == self.spec.slot), None)
+                if slot is None:
+                    raise RuntimeError("Interrupted slot is missing from server status")
+                if slot.get("is_processing") is False:
+                    return
+            finally:
+                connection.close()
+            cancel.wait(min(0.1, max(0, deadline - time.monotonic())))
+        raise InterruptedError("Slot drain check cancelled")
 
     def _messages(self, messages, max_tokens):
         """Bound old agent history, preserving initial instructions and tool pairs.
