@@ -1,49 +1,40 @@
 {
-  "model": "/media/escrq/New Volume/models/qwen3.6 35b a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf",
+  "shared_model": {
+    "alias": "assistant",
+    "slots": 4,
+    "drain_timeout": 30
+  },
   "max_agents": 3,
   "max_iterations": 64,
   "default_iterations": 16,
   "heartbeat_interval": 5,
   "max_tokens": -1,
-  "startup_timeout": 300,
+  "enable_thinking": true,
+  "reasoning_effort": "low",
   "request_timeout": 300,
   "batch_timeout": 1800,
   "max_transcript_bytes": 16000000,
   "workers": [
     {
-      "gpu": "0",
-      "port": 8091,
-      "cpu_moe_layers": 16,
-      "threads": 6,
-      "context_size": 65536,
-      "moe_cache_mib": 0
+      "slot": 1,
+      "context_size": 65536
     },
     {
-      "gpu": "1",
-      "port": 8092,
-      "cpu_moe_layers": 16,
-      "threads": 6,
-      "context_size": 65536,
-      "moe_cache_mib": 0
+      "slot": 2,
+      "context_size": 65536
     },
     {
-      "gpu": "2",
-      "port": 8093,
-      "cpu_moe_layers": 16,
-      "threads": 6,
-      "context_size": 65536,
-      "moe_cache_mib": 0
+      "slot": 3,
+      "context_size": 65536
     }
   ],
-  "mtp": {
-    "enabled": true,
-    "model": "/media/escrq/New Volume/models/qwen3.6 35b a3b/mtp-Qwen3.6-35B-A3B-Q8_0.gguf",
-    "gpu": "3",
-    "draft_max": 2,
-    "draft_min": 0,
-    "gpu_layers": 99,
-    "threads": 6,
-    "cache_type_k": "f16",
-    "cache_type_v": "f16"
+  "orchestrator": {
+    "slot": 0,
+    "context_size": 32768,
+    "max_iterations": 128,
+    "max_tasks": 24,
+    "max_tokens": -1,
+    "enable_thinking": true,
+    "reasoning_effort": "medium"
   }
 }

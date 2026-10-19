@@ -15,7 +15,6 @@ class GPUResource(str, Enum):
     OBSERVER = "observer"
     CODER = "coder"
     JINA = "jina"
-    WORKERS = "workers"
 
 
 class ResourceManager:
@@ -23,11 +22,11 @@ class ResourceManager:
     Central owner of GPU-heavy resources.
 
     Invariant:
-        One assistant, observer, coder, reranker, or parallel worker batch
+        One assistant, observer, coder, reranker,
         owns the GPU group at a time.
 
-    Main models use the existing router; workers are independently owned
-    processes reserved as a group through worker_batch().
+    Shared agents use the assistant router model under shared_agent_batch();
+    their HTTP requests run concurrently while model switching is excluded.
     Jina is loaded lazily and owned by this manager.
     """
 
@@ -58,7 +57,8 @@ class ResourceManager:
 
         # Jina is intentionally lazy-loaded.
         self._jina = None
-        self._worker_cleanup_failed = False
+        self._agent_cleanup_failed = False
+        self._shared_agents_active = False
 
         print(
             f"{Fore.CYAN}"
@@ -436,10 +436,10 @@ class ResourceManager:
                 ) from exc
 
         with self.lock:
-            if self._worker_cleanup_failed:
-                raise RuntimeError("Worker cleanup failed; restart the backend before loading a model")
-            if self.current_owner == GPUResource.WORKERS:
-                raise RuntimeError("Worker batch owns the GPUs")
+            if self._agent_cleanup_failed:
+                raise RuntimeError("Agent requests failed to drain; restart the backend before loading a model")
+            if self._shared_agents_active:
+                raise RuntimeError("Shared agents own the assistant model; wait for their request lease")
 
             # ------------------------------------------------------------
             # Router is the source of truth.
@@ -515,23 +515,65 @@ class ResourceManager:
             return self._jina
 
     @contextmanager
-    def worker_batch(self):
-        """Reserve GPUs for independent worker processes until ALL are reaped.
+    def shared_agent_batch(self, alias, required_slots, drain_timeout, cancel):
+        """Keep assistant weights resident; HTTP clients bypass this owner lock.
 
-        Enter from a blocking batch thread. Worker inference does not acquire
-        this lock; other assistant/observer/coder requests remain excluded.
+        The batch owner retains the lock, excluding observer/coder/Jina switches.
+        Agent requests use independent sockets and never acquire the owner lock.
+        Main inference resumes only after server-side slots are confirmed idle.
         """
         with self.lock:
-            if self._worker_cleanup_failed or self.current_owner == GPUResource.WORKERS:
-                raise RuntimeError("Workers already active or cleanup requires a backend restart")
-            self._release_current()
-            self.current_owner = GPUResource.WORKERS
-            try:
-                yield
-            finally:
-                if not self._worker_cleanup_failed:
-                    self.current_owner = GPUResource.NONE
+            if self._agent_cleanup_failed or self._shared_agents_active:
+                raise RuntimeError("Shared agents already active or cleanup requires a backend restart")
+            if alias != self.assistant_model:
+                raise ValueError("shared_model.alias must match the ResourceManager assistant model")
+            if cancel.is_set():
+                raise InterruptedError("Shared delegation cancelled")
+            self.acquire(GPUResource.ASSISTANT)
+            with requests.Session() as http:
+                http.trust_env = False
+                with http.get(self.router_url + "/props", params={"model": alias}, timeout=10) as response:
+                    response.raise_for_status()
+                    props = response.json()
+                actual = props.get("total_slots")
+                if type(actual) is not int or actual < required_slots:
+                    raise RuntimeError(f"Assistant exposes {actual!r} slots; set parallel = {required_slots} "
+                                       "or higher in models.ini and restart the router")
+                slots = self._shared_slots(http, alias, 10)
+                if len(slots) < required_slots or any(item.get("is_processing") is not False for item in slots):
+                    raise RuntimeError("Shared assistant slots must be observable and idle before delegation")
+                self._shared_agents_active = True
+                try:
+                    yield
+                finally:
+                    try:
+                        deadline = time.monotonic() + drain_timeout
+                        while True:
+                            remaining = deadline - time.monotonic()
+                            slots = self._shared_slots(http, alias, max(0.1, min(5, remaining)))
+                            if len(slots) >= required_slots and all(
+                                    item.get("is_processing") is False for item in slots):
+                                break
+                            if remaining <= 0:
+                                raise TimeoutError("Shared inference slots did not drain; restart the backend/router")
+                            time.sleep(min(0.05, max(0, remaining)))
+                    except BaseException:
+                        self._agent_cleanup_failed = True
+                        raise
+                    finally:
+                        self._shared_agents_active = False
+                        self.current_owner = GPUResource.ASSISTANT
+
+    def _shared_slots(self, http, alias, timeout):
+        with http.get(self.router_url + "/slots", params={"model": alias}, timeout=timeout) as response:
+            response.raise_for_status()
+            value = response.json()
+        if isinstance(value, dict):
+            value = value.get("slots", value.get("data"))
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            raise RuntimeError("Unexpected shared /slots response; enable slots monitoring in models.ini")
+        return value
+
 
 
 resource_manager = ResourceManager()
-
