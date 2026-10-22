@@ -6,22 +6,43 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 
 class LlamaRouterManager:
 
     def __init__(self):
-        self.server_path = (
-            "/home/escrq/Desktop/llama.cpp/build/bin/llama-server"
-        )
+        llama_dir = os.environ.get("LLAMA_DIR", "").strip()
+        llama_config = os.environ.get("LLAMA_CONFIG", "").strip()
 
-        self.lib_dir = (
-            "/home/escrq/Desktop/llama.cpp/build/bin"
-        )
+        if not llama_dir:
+            raise RuntimeError(
+                "LLAMA_DIR is unset. Export the llama.cpp root directory "
+                "before starting the backend."
+            )
+        if not llama_config:
+            raise RuntimeError(
+                "LLAMA_CONFIG is unset. Export the models.ini path "
+                "before starting the backend."
+            )
 
-        self.models_preset = (
-            "/home/escrq/Desktop/Assistant/models.ini"
-        )
+        bin_dir = Path(llama_dir).expanduser().resolve() / "build" / "bin"
+        self.lib_dir = str(bin_dir)
+        self.server_path = str(bin_dir / "llama-server")
+        self.models_preset = Path(llama_config).expanduser().resolve()
+
+        if not Path(self.server_path).is_file():
+            raise FileNotFoundError(
+                f"llama-server not found: {self.server_path}"
+            )
+        if not os.access(self.server_path, os.X_OK):
+            raise PermissionError(
+                f"llama-server is not executable: {self.server_path}"
+            )
+        if not self.models_preset.is_file():
+            raise FileNotFoundError(
+                f"models.ini not found: {self.models_preset}"
+            )
 
         self.host = "127.0.0.1"
         self.port = 8080
@@ -68,15 +89,15 @@ class LlamaRouterManager:
             # ----------------------------------------------------
             # FastAPI may have CUDA_VISIBLE_DEVICES=1.
             #
-            # Router must see all 3 GPUs.
+            # Router must see all 4 GPUs.
             # ----------------------------------------------------
 
             env["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 
-            env["LD_LIBRARY_PATH"] = (
-                f"{self.lib_dir}:"
-                f"{env.get('LD_LIBRARY_PATH', '')}"
-            )
+            existing_lib_path = env.get("LD_LIBRARY_PATH", "")
+            env["LD_LIBRARY_PATH"] = self.lib_dir
+            if existing_lib_path:
+                env["LD_LIBRARY_PATH"] += ":" + existing_lib_path
 
             command = [
                 self.server_path,

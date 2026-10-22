@@ -8,7 +8,4 @@ transformers
 chromadb
 rapidfuzz
 ddgs
-
-
-
-
+python-multipart

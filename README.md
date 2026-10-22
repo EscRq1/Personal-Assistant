@@ -43,3 +43,17 @@ python3 -m pip download \
 
 echo "Wheels downloaded to $destination"
 ```
+SETUP REQUIRED ENVIRONMENT PATHS
+=
+```bash
+export LLAMA_DIR = <PATH>    #Setup path to llama.cpp root directory
+export LLAMA_CONFIG = <PATH>    #Setup path to models.ini file(required for dynamic llama router)
+```
+
+SETUP CUSTOM ENVIRONMENT PATHS(DEFAULT ARE SET)
+=
+```bash
+export SANDBOX_WHEEL_CACHE = <PATH>    #Setup path to sandbox package wheels directory
+export ASSISTANT_AGENT_CONFIG = <PATH>    #Setup path to agents.json
+export ASSISTANT_SANDBOX_DIR = <PATH>   #Setup path to main sandbox directory
+```

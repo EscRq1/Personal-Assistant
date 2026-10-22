@@ -866,12 +866,33 @@ class Controller:
 
         # Create an independent conversation for this reasoning tier.
 
-        messages = list(messages)
-        messages.append({"role": "system", "content": (
+        parent_messages = list(messages)
+
+        # Collect the inherited instructions at the beginning.
+        system_parts = []
+        prefix_length = 0
+
+        for message in parent_messages:
+            if message.get("role") not in {"system", "developer"}:
+                break
+
+            system_parts.append(message.get("content") or "")
+            prefix_length += 1
+
+        system_parts.append(
             "For this invocation you are the coding specialist. The main assistant "
             "retains orchestration. You cannot delegate or invoke call_coder. "
             "Return your findings and execution evidence to the main assistant."
-        )})
+        )
+
+        # Build a separate child conversation with one initial system message.
+        messages = [
+            {
+                "role": "system",
+                "content": "\n\n".join(system_parts),
+            },
+            *parent_messages[prefix_length:],
+        ]
 
         # Determine the tools actually available to THIS tier.
 
