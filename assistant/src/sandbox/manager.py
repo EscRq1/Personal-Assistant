@@ -25,7 +25,19 @@ class SandboxManager:
     def __init__(self, config: SandboxConfig | None = None, base_dir: Path | None = None,
                  executor: DockerExecutor | None = None) -> None:
         self.config = config or SandboxConfig()
-        self.workspaces = WorkspaceManager(base_dir or Path.home() / ".assistant/sandbox", self.config)
+        sandbox_dir = (
+            base_dir
+            if base_dir is not None
+            else Path(
+                os.environ.get(
+                    "ASSISTANT_SANDBOX_DIR",
+                    str(Path.home() / ".assistant" / "sandbox"),
+                )
+            ).expanduser()
+        )
+        
+        self.workspaces = WorkspaceManager(sandbox_dir, self.config)
+
         self.base_dir = self.workspaces.base_dir
         # One backend process owns a storage root. Per-session locks serialize
         # commands inside that process; independent sessions remain concurrent.
