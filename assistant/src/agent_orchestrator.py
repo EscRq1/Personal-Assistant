@@ -79,6 +79,15 @@ def orchestrator_tools(config):
                      "assignment": task,
                      "source_task": {"type": "string", "description": "Optional finished task ID, e.g. agent1"}},
                  ("assignment",)),
+        function("review_worker", "Resolve a pending worker health review after inspect_worker. "
+                 "Continue with a concrete reason and a bounded reassessment deadline, or interrupt "
+                 "to preserve files before continuation/splitting. Use the review_id returned by inspection.", {
+                     "task_id": {"type": "string"}, "review_id": {"type": "integer", "minimum": 1},
+                     "decision": {"type": "string", "enum": ["continue", "interrupt"]},
+                     "reason": {"type": "string", "minLength": 1, "maxLength": 2000},
+                     "recheck_seconds": {"type": "integer", "minimum": 1,
+                                         "maximum": max(1, config.orchestrator.status_wait_seconds)}},
+                 ("task_id", "review_id", "decision", "reason")),
         function("workers_status", "Wait efficiently for verified worker completion, an attention request, "
                  "or a slow/no-progress alert. Omit wait_seconds for the operator's long default wait; "
                  "workers wake it immediately when done. No model inference runs while waiting. "
@@ -118,6 +127,9 @@ class OrchestratedBatch(WorkerRuntime):
         self._condition = threading.Condition()
         self._events = deque(maxlen=256)
         self._event_sequence = 0
+        self._supervision_lock = threading.RLock()
+        self._watched_tasks = {}
+        self._completed_durations = []
         progress = ProgressReporter(ctx, batch_id, on_event=self._notify)
         cancel = BatchCancellation(ctx.cancel_event)
         workspaces = None
@@ -148,8 +160,18 @@ class OrchestratedBatch(WorkerRuntime):
             return {"error": "missing_context", "done": True}
 
         def monitor():
+            supervision_due = time.monotonic()
             heartbeat = time.monotonic() + self.config.heartbeat_interval
             while not ended.wait(0.05):
+                if time.monotonic() >= supervision_due:
+                    # Cached telemetry only: no model request, sandbox read, or
+                    # scheduler mutation on the watchdog thread.
+                    try:
+                        self._scan_health()
+                    except Exception:
+                        log.exception("Background worker supervision scan failed")
+                    supervision_due = time.monotonic() + max(
+                        0.05, self.config.orchestrator.supervision_interval)
                 if time.monotonic() >= heartbeat:
                     progress.emit()
                     heartbeat = time.monotonic() + self.config.heartbeat_interval
@@ -324,41 +346,113 @@ class OrchestratedBatch(WorkerRuntime):
             return {"flags": []}
         state = self.progress.snapshot(task_id)
         policy = self.config.orchestrator
-        durations = [entry["result"].get("duration_seconds", 0) for entry in self.tasks.values()
-                     if entry.get("result") and entry["result"]["status"] == "completed"
-                     and entry["result"].get("duration_seconds", 0) > 0]
+        with self._supervision_lock:
+            durations = tuple(self._completed_durations)
         reference = median(durations) if durations else None
-        threshold = max(policy.slow_task_seconds, (reference or 0) * policy.slow_task_factor)
+        # A predictable total-assignment warning, never reset by tokens/tools.
+        # The median remains evidence, not a multiplier that postpones review.
+        threshold = policy.slow_task_seconds
         flags = []
-        if policy.slow_task_seconds > 0 and state.get("elapsed_seconds", 0) >= threshold:
+        if threshold > 0 and state.get("elapsed_seconds", 0) >= threshold:
             flags.append("long_running")
         if policy.no_progress_seconds > 0 and state.get("seconds_since_progress", 0) >= policy.no_progress_seconds:
             flags.append("no_tool_or_report_progress")
         return {"flags": flags, "completed_task_median_seconds": reference,
                 "slow_threshold_seconds": threshold,
-                "note": "Elapsed time is a warning; compare task complexity and inspect progress before interrupting."}
+                "note": "Inspect flagged work; record a reasoned continuation or interrupt safely."}
 
     def _scan_health(self):
-        for task_id, item in self.tasks.items():
-            flags = self._health(item, task_id)["flags"]
-            progress_version = (self.progress.snapshot(task_id).get("progress_version")
-                                if "no_tool_or_report_progress" in flags else None)
-            version = (progress_version, tuple(flags))
-            previous = item.get("health_version")
-            previous_flags = set(previous[1]) if previous else set()
-            # Continued useful work on an already-long task must not keep
-            # waking the coordinator after every completed tool.
-            alert = bool(set(flags) - previous_flags) or (
-                "no_tool_or_report_progress" in flags and previous is not None and previous[0] != progress_version)
-            item["health_version"] = version
-            if alert:
+        # _watched_tasks is registered/retired by the coordinator under this
+        # lock. Background supervision never iterates the mutable task board.
+        with self._supervision_lock:
+            now = time.monotonic()
+            for task_id, item in self._watched_tasks.items():
+                flags = self._health(item, task_id)["flags"]
+                review = item.setdefault("supervision", {
+                    "pending": False, "review_id": 0, "next_review_at": 0,
+                    "last_flags": [], "history": []})
+                if not flags or review["pending"]:
+                    continue
+                new_flags = set(flags) - set(review["last_flags"])
+                if not new_flags and now < review["next_review_at"]:
+                    continue
+                review.update(pending=True, review_id=review["review_id"] + 1,
+                              flags=list(flags), last_flags=list(flags),
+                              inspection_review_id=None,
+                              alerted_elapsed_seconds=self.progress.snapshot(task_id).get("elapsed_seconds", 0))
                 self._notify("worker_health", task_id)
+
+    def _supervision_view(self, item):
+        with self._supervision_lock:
+            review = item.get("supervision")
+            if not review:
+                return {}
+            return {"pending": review["pending"], "review_id": review["review_id"],
+                    "flags": list(review.get("flags", [])),
+                    "inspected": review.get("inspection_review_id") == review["review_id"],
+                    "recheck_in_seconds": round(max(0, review["next_review_at"] - time.monotonic()), 3),
+                    "last_decision": deepcopy(review["history"][-1]) if review["history"] else None}
+
+    def _pending_supervision(self):
+        with self._supervision_lock:
+            return {task_id: {"supervision": self._supervision_view(item),
+                    "progress": self.progress.snapshot(task_id), "health": self._health(item, task_id)}
+                    for task_id, item in self._watched_tasks.items()
+                    if item.get("supervision", {}).get("pending")
+                    and item.get("result") is None and not item.get("interrupt_reason")}
+
+    def _review_worker(self, arguments):
+        if set(arguments) - {"task_id", "review_id", "decision", "reason", "recheck_seconds"}:
+            raise ValueError("Unknown review_worker arguments")
+        task_id = arguments.get("task_id")
+        if not isinstance(task_id, str) or task_id not in self.tasks:
+            raise ValueError("Unknown task_id")
+        reason = arguments.get("reason")
+        if not isinstance(reason, str) or not reason.strip() or len(reason) > 2000:
+            raise ValueError("Provide a concrete review reason of at most 2000 characters")
+        decision = arguments.get("decision")
+        if decision not in {"continue", "interrupt"}:
+            raise ValueError("Choose continue or interrupt; split only after a safe snapshot")
+        self._harvest()
+        item = self.tasks[task_id]
+        with self._supervision_lock:
+            review = item.get("supervision")
+            if item.get("result") is not None:
+                return {"already_finished": True, "next_step": "Inspect and collect its result."}
+            if not review or not review["pending"]:
+                raise ValueError("Task has no pending supervision review")
+            if type(arguments.get("review_id")) is not int or arguments["review_id"] != review["review_id"]:
+                raise ValueError("Stale review_id; inspect the current task again")
+            if review.get("inspection_review_id") != review["review_id"]:
+                raise ValueError("Call inspect_worker for this review before deciding")
+            maximum = max(1, self.config.orchestrator.status_wait_seconds)
+            seconds = arguments.get("recheck_seconds", maximum) if decision == "continue" else None
+            if decision == "continue" and (type(seconds) is not int or not 1 <= seconds <= maximum):
+                raise ValueError(f"recheck_seconds must be between 1 and {maximum}")
+            record = {"review_id": review["review_id"], "decision": decision,
+                      "reason": reason.strip(), "progress": self.progress.snapshot(task_id),
+                      "recheck_seconds": seconds if decision == "continue" else None}
+            # Persist before acknowledging the decision. Nothing is silently
+            # cleared if writing evidence fails.
+            with (self.journal / "supervision.jsonl").open("a", encoding="utf-8") as journal:
+                journal.write(json.dumps({"task_id": task_id, **record}) + "\n")
+            review["history"].append(record)
+            if decision == "continue":
+                review.update(pending=False, next_review_at=time.monotonic() + seconds)
+        if decision == "interrupt":
+            # Existing cancellation, drain, export and slot-recovery path.
+            return self._interrupt({"task_id": task_id, "reason": reason.strip()})
+        self._checkpoint_board()
+        return {"accepted": True, "task_id": task_id, "decision": decision,
+                "recheck_seconds": seconds}
 
     def _wait_events(self, seconds):
         deadline = None if seconds is None else time.monotonic() + seconds
         while True:
             self._harvest()
             self._scan_health()
+            # Compute outside the event lock (supervision -> event lock order).
+            pending = bool(self._pending_supervision())
             with self._condition:
                 if self._events:
                     events = list(self._events)
@@ -367,6 +461,9 @@ class OrchestratedBatch(WorkerRuntime):
                         for event in events:
                             journal.write(json.dumps(event) + "\n")
                     return events, False
+                # Consuming an event never acknowledges the review itself.
+                if pending:
+                    return [], False
                 if self.cancel.is_set() or not self._running():
                     return [], False
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -386,7 +483,20 @@ class OrchestratedBatch(WorkerRuntime):
         self._harvest()
         item = self.tasks[task_id]
         if item.get("result") is None:
-            item["interrupt_reason"] = reason
+            with self._supervision_lock:
+                review = item.get("supervision")
+                if review and review["pending"] and not (
+                        review["history"] and review["history"][-1]["review_id"] == review["review_id"]
+                        and review["history"][-1]["decision"] == "interrupt"):
+                    record = {"review_id": review["review_id"], "decision": "interrupt",
+                              "reason": reason, "progress": self.progress.snapshot(task_id),
+                              "recheck_seconds": None}
+                    with (self.journal / "supervision.jsonl").open("a", encoding="utf-8") as journal:
+                        journal.write(json.dumps({"task_id": task_id, **record}) + "\n")
+                    review["history"].append(record)
+                item["interrupt_reason"] = reason
+                if review:
+                    review["pending"] = False
             item["cancel"].set()
             self.slots[item["worker_id"]]["client"].close()
             wait([item["future"]], timeout=max(0, self.config.orchestrator.interrupt_timeout))
@@ -408,7 +518,14 @@ class OrchestratedBatch(WorkerRuntime):
                 result = {"id": task_id, "status": "failed", "done": True, "iterations": 0,
                           "result": "", "blockers": [str(exc)[:2000]], "snapshot_complete": False}
             result.update(worker_id=item["worker_id"], disposition=item.get("disposition"))
-            item["result"] = result
+            with self._supervision_lock:
+                item["result"] = result
+                self._watched_tasks.pop(task_id, None)
+                if item.get("supervision"):
+                    item["supervision"]["pending"] = False
+                    result["supervision_history"] = deepcopy(item["supervision"]["history"])
+                if result["status"] == "completed" and result.get("duration_seconds", 0) > 0:
+                    self._completed_durations.append(result["duration_seconds"])
             slot = self.slots[item["worker_id"]]
             slot["task_id"] = None
             if item.get("interrupt_reason"):
@@ -456,11 +573,13 @@ class OrchestratedBatch(WorkerRuntime):
                 "status": item["result"]["status"] if item.get("result") else "running",
                 "task": item["assignment"].task if detailed else item["assignment"].task[:300],
                 "progress": self.progress.snapshot(task_id), "health": self._health(item, task_id),
+                "supervision": self._supervision_view(item),
                 "interruption_requested": bool(item.get("interrupt_reason")),
                 "disposition": (item.get("disposition") if detailed or not item.get("disposition") else {
                     "action": item["disposition"]["action"], "reason": item["disposition"]["reason"][:200]}),
                 "report": report(item)}
                 for task_id, item in self.tasks.items()},
+            "supervision_required": self._pending_supervision(),
             "tasks_remaining": self.config.orchestrator.max_tasks - len(self.tasks),
             "idle_workers": [name for name, slot in self.slots.items()
                              if slot["task_id"] is None and not slot.get("unavailable")],
@@ -549,6 +668,8 @@ class OrchestratedBatch(WorkerRuntime):
                  "cancel": BatchCancellation(self.cancel), "health_version": None}
         self.tasks[task_id] = entry
         self.progress.set(task_id, "queued", 0, task.iterations)
+        with self._supervision_lock:
+            self._watched_tasks[task_id] = entry
         entry["future"] = self.pool.submit(self._run_worker, self.ctx, entry["cancel"], self.workspaces,
             task_id, task, session, journal, slot["client"], self.progress)
         entry["future"].add_done_callback(lambda future: self._notify("worker_done", task_id))
@@ -575,7 +696,12 @@ class OrchestratedBatch(WorkerRuntime):
         self._harvest()
         item = self.tasks[task_id]
         if item.get("result") is None:
+            with self._supervision_lock:
+                review = item.get("supervision")
+                if review and review["pending"]:
+                    review["inspection_review_id"] = review["review_id"]
             view = {"task_id": task_id, "running": True,
+                    "supervision": self._supervision_view(item),
                     "progress": self.progress.snapshot(task_id), "health": self._health(item, task_id)}
             if arguments.get("path") is not None:
                 from agent_workspace import live_preview
@@ -634,6 +760,9 @@ class OrchestratedBatch(WorkerRuntime):
         self._harvest()
         self.progress.set("orchestrator", "waiting for worker events", self.coordinator_used,
                           self.config.orchestrator.max_iterations)
+        if self._pending_supervision():
+            return {**self._board(), "events": [], "wait_timed_out": False,
+                    "next_action": "Inspect each flagged task; call review_worker or interrupt_worker."}
         unreported = any(item.get("result") is not None and not item.get("status_seen")
                          for item in self.tasks.values())
         events, timed_out = self._wait_events(0 if unreported else seconds)
@@ -709,6 +838,10 @@ class OrchestratedBatch(WorkerRuntime):
             "You coordinate a resident worker pool and own the integrated /workspace candidate. "
             "The main assistant is waiting and will judge your final deliverable. Health alerts are "
             "suspicions, not proof of failure: compare task complexity, tool progress, and elapsed time. "
+            "A pending supervision review is mandatory: inspect_worker for the task, then "
+            "review_worker with its review_id, concrete reason, and a bounded recheck_seconds "
+            "to continue, or interrupt it. You cannot wait or dispatch unrelated work while "
+            "a review is pending. Continued long tasks are reviewed again at the deadline. "
             "If a worker is stuck, inspect it, call interrupt_worker to stop just that assignment, "
             "and wait for its complete saved snapshot. Decompose its remaining work into smaller "
             "assignments and call delegate_worker(source_task=the interrupted task) for each, "
@@ -766,13 +899,21 @@ class OrchestratedBatch(WorkerRuntime):
                 note["instruction"] = "Finished results need review. Inspect/collect them, then reassign idle workers if useful work remains; harvesting alone does not dispatch work."
             if not self.tasks:
                 note["instruction"] = "No worker has been dispatched. Call delegate_worker now, or finish_task with a concrete blocker if delegation is impossible."
-            if remaining == 1:
+            pending = self._pending_supervision()
+            if pending:
+                note["supervision_required"] = pending
+                note["instruction"] = "MANDATORY: inspect a flagged task, then review_worker(continue with deadline, or interrupt). Do not ignore total elapsed time."
+            if remaining == 1 and not pending:
                 note["instruction"] = "FINAL ROUND: if workers are idle, call finish_task; report partial if anything remains."
             self.progress.set("orchestrator", "coordinating", index + 1, limit)
             self.coordinator_used = index + 1
             started = time.monotonic()
+            request_tools = tools
+            if pending:
+                request_tools = [tool for tool in tools if tool["function"]["name"] in
+                                 {"inspect_worker", "review_worker", "interrupt_worker"}]
             message, finish = client.complete(self._request_messages(note),
-                tools, self.cancel, self.config.orchestrator.max_tokens,
+                request_tools, self.cancel, self.config.orchestrator.max_tokens,
                 on_progress=lambda: self.progress.activity("orchestrator"))
             with (self.journal / "inference.jsonl").open("a", encoding="utf-8") as evidence:
                 evidence.write(json.dumps({"round": index + 1,
@@ -825,8 +966,17 @@ class OrchestratedBatch(WorkerRuntime):
                         args.pop("summary", None)
                         name = function.get("name")
                         self.progress.set("orchestrator", str(name or "tool"), index + 1, limit)
+                        # Recheck after inference: a warning may have arrived
+                        # while the model was generating its proposed action.
+                        pending_now = self._pending_supervision()
                         if self.cancel.is_set():
                             value = {"cancelled": True}
+                        elif pending_now and (name not in {"inspect_worker", "review_worker", "interrupt_worker"}
+                                              or args.get("task_id") not in pending_now):
+                            value = {"error": "supervision_required", "tasks": pending_now,
+                                     "next_action": "Inspect a flagged task, then record a review or interrupt it."}
+                        elif name == "review_worker":
+                            value = self._review_worker(args)
                         elif name == "delegate_worker":
                             value = self._dispatch(args)
                         elif name == "workers_status":
