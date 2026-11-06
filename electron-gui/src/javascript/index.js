@@ -749,17 +749,17 @@ async function sendMessage() {
     const query = ain.value.trim();
     if (!query && !pendingAttachments.length) return;
 
-    const generationId = ++currentGenerationId;
-    const controller = new AbortController();
-    currentAbortController = controller;
-
     const generationFiles = [...pendingAttachments];
-
     const split = splitOversizedInput(query);
     if (split) {
         query = split.inline;
         generationFiles.push(split.file);
     }
+
+    const generationId = ++currentGenerationId;
+    const controller = new AbortController();
+    currentAbortController = controller;
+
 
     const requestChatId = currentChatId;
     const requestDraftId = currentDraftId;
