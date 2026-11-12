@@ -18,85 +18,134 @@
     <link rel="stylesheet" href="../../assets/katex.min.css">
 
     <style>
-        .code, .auto, .assistant {
-            margin: 0;
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            border-radius: 5px;
-        }
-
-        .code:hover, .auto:hover, .assistant:hover {
-            background-color: rgba(199, 199, 199, 0.719);
-        }
+        /* Dark <select> popups (Chromium / Electron) */
+        select option { background: #2d2e30; color: #e8eaed; }
     </style>
 </head>
 <body>
-    
 
     <div class="container" id="gc">
+        <section class="sidebar">
+            <div class="sb-top">
+                <button class="col-btn" id="btn" aria-label="Toggle sidebar">
+                    <img src="../../assets/bars-solid-full.svg" alt="">
+                </button>
+                <span class="brand">Assistant</span>
+            </div>
+
+            <button class="new-btn" aria-label="Create a new chat">
+                <img src="../../assets/plus-solid-full.svg" alt="">
+                <span class="new-btn-label">New chat</span>
+            </button>
+
+            <p class="sb-label">History</p>
+
+            <section class="sb-container">
+            </section>
+
+            <div class="sb-spacer"></div>
+
+            <button class="save-btn" id="save-btn" aria-label="Save current chat">
+                <img src="../../assets/floppy-disk-regular-full.svg" alt="">
+                <span class="save-btn-label">Save chat</span>
+            </button>
+        </section>
+
         <section class="header">
-            <p class="summary" id="sum-header">New chat</p>
+            <p class="summary" id="sum-header" tabindex="0"
+               aria-describedby="sum-snippet">New chat</p>
+            <div class="summary-tooltip" id="sum-snippet" role="tooltip">Ask something to start a new chat</div>
 
             <div class="header-menu-wrap">
                 <button class="header-menu-btn" id="header-menu-btn"
-                        aria-label="App menu" aria-haspopup="true" aria-expanded="false">
-                    <!-- reuses an asset you already ship -->
+                        aria-label="Run settings" aria-haspopup="true" aria-expanded="false">
                     <img src="../../assets/ellipsis-vertical-solid-full.svg" alt="">
                 </button>
 
-                <div class="header-menu" id="header-menu" aria-label="App menu">
-                    <div class="header-menu-section">
-                        <p class="header-menu-label">Assistant:</p>
-                        <span class="select-container" style="--snippet:'Choose thinking mode'">
-                            <select class="header-menu-select" id="hm-assist-1" aria-label="Assistant mode">
-                                <option value="low" selected>Flash</option>
-                                <option value="medium">Thinking</option>
-                                <option value="high">Deep</option>
-                            </select>
-                        </span>
-                        <span class="select-container" style="--snippet:'Set thinking budget'">
-                            <select class="header-menu-select" id="hm-assist-2" aria-label="Assistant thinking budget">
-                                <option value="1024" selected>1024</option>
-                                <option value="4096">4096</option>
-                                <option value="8192">8192</option>
-                                <option value="-1">Unlimited</option>
-                            </select>
-                        </span>
+                <!-- Slide-in "Run settings" panel. JS toggles .open on it,
+                     closes on outside click / Escape. -->
+                <div class="header-menu" id="header-menu" aria-label="Run settings">
+                    <div class="hm-head">
+                        <span class="hm-title">Run settings</span>
                     </div>
 
-                    <div class="header-menu-sep"></div>
+                    <div class="hm-card">
+                        <div class="hm-card-title">Assistant</div>
+                        <p class="hm-card-desc">Main conversational model. Choose a thinking
+                            mode and how much of the response budget reasoning may use.</p>
 
-                    <div class="header-menu-section">
-                        <p class="header-menu-label">Coder:</p>
-                        <span class="select-container" style="--snippet:'Choose thinking mode'">
-                            <select class="header-menu-select" id="hm-coder-1" aria-label="Coder mode" style="margin-left: 18px;">
-                                <option value="low">Flash</option>
-                                <option value="medium" selected>Thinking</option>
-                                <option value="xhigh">Deep</option>
-                            </select>
-                        </span>
-                        <span class="select-container" style="--snippet:'Set thinking budget'">
-                            <select class="header-menu-select" id="hm-coder-2" aria-label="Coder thinking budget">
-                                <option value="1024">1024</option>
-                                <option value="4096" selected>4096</option>
-                                <option value="8192">8192</option>
-                                <option value="16384">16384</option>
-                                <option value="-1">Unlimited</option>
-                            </select>
-                        </span>
+                        <div class="hm-field">
+                            <span class="select-container" style="--snippet:'Choose thinking mode'">
+                                <select class="header-menu-select" id="hm-assist-1" aria-label="Assistant mode">
+                                    <option value="low" selected>Flash</option>
+                                    <option value="medium">Thinking</option>
+                                    <option value="high">Deep</option>
+                                </select>
+                            </span>
+                        </div>
+
+                        <div class="hm-field">
+                            <span class="select-container" style="--snippet:'Set thinking budget'">
+                                <select class="header-menu-select" id="hm-assist-2" aria-label="Assistant thinking budget">
+                                    <option value="1024" selected>1024</option>
+                                    <option value="4096">4096</option>
+                                    <option value="8192">8192</option>
+                                    <option value="-1">Unlimited</option>
+                                </select>
+                            </span>
+                        </div>
                     </div>
-                    <div class="header-menu-sep"></div>
-                    <div class="header-menu-section">
-                        <p class="header-menu-label">Tool calls:</p>
-                        <span class="select-container" style="--snippet:'Set maximum tool calls'">
-                            <input class="header-menu-input" id="hm-tools" aria-label="Maximum tool calls allowed" style="margin-left: 18px;" value="8">
-                                
-                            </input>
-                        </span>
+
+                    <div class="hm-card">
+                        <div class="hm-card-title">Coder</div>
+                        <p class="hm-card-desc">Model used for delegated coding tasks.</p>
+
+                        <div class="hm-field">
+                            <span class="select-container" style="--snippet:'Choose thinking mode'">
+                                <select class="header-menu-select" id="hm-coder-1" aria-label="Coder mode">
+                                    <option value="low">Flash</option>
+                                    <option value="medium" selected>Thinking</option>
+                                    <option value="xhigh">Deep</option>
+                                </select>
+                            </span>
+                        </div>
+
+                        <div class="hm-field">
+                            <span class="select-container" style="--snippet:'Set thinking budget'">
+                                <select class="header-menu-select" id="hm-coder-2" aria-label="Coder thinking budget">
+                                    <option value="1024">1024</option>
+                                    <option value="4096" selected>4096</option>
+                                    <option value="8192">8192</option>
+                                    <option value="16384">16384</option>
+                                    <option value="-1">Unlimited</option>
+                                </select>
+                            </span>
+                        </div>
+                    </div>
+
+                    <div class="hm-card">
+                        <div class="hm-card-title">Tools</div>
+                        <p class="hm-card-desc">Maximum number of tool calls per turn.</p>
+
+                        <div class="hm-field">
+                            <span class="select-container" style="--snippet:'Set maximum tool calls'">
+                                <input class="header-menu-input" id="hm-tools"
+                                       aria-label="Maximum tool calls allowed" value="8">
+                            </span>
+                        </div>
                     </div>
                 </div>
+
+                <!-- Close (X) button. It is intentionally OUTSIDE #header-menu:
+                     the JS outside-click handler (capture phase) then closes the
+                     panel for free when it is clicked. Sibling selector shows it
+                     only while the panel is open. -->
+                <button class="header-menu-close" id="header-menu-close-btn" aria-label="Close settings">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                         stroke-width="2" stroke-linecap="round">
+                        <path d="M6 6l12 12M18 6L6 18"/>
+                    </svg>
+                </button>
             </div>
         </section>
 
@@ -107,62 +156,46 @@
 
                     <button class="menu-item" id="pin-btn">Pin chat</button>
 
-                    <button class="menu-item danger" style="color: brown;" id="del-btn">Delete</button>
+                    <button class="menu-item danger" style="color: #f28b82;" id="del-btn">Delete</button>
                 </div>
             </section>
-
 
             <section class="sub-content">
                 <div class="output"></div>
                 <div class="input-cont">
                     <div class="attachment-tray" id="attachment-tray"></div>
                     <textarea class="input" id="ai-input" placeholder="Ask assistant" rows="1"></textarea>
-                    
-                    <div style="grid-area: filler; display: flex; align-items: center;">
-                        <label class="switch">
+
+                    <div class="composer-row">
+                        <button class="i-btn" id="img-btn" aria-label="Attach files">
+                            <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+                                 stroke-width="2" stroke-linecap="round">
+                                <path d="M12 5v14M5 12h14"/>
+                            </svg>
+                        </button>
+                        <input type="file" id="img-input" accept="image/*" multiple style="display:none" />
+
+                        <label class="switch" title="Web search toggle">
                             <input type="checkbox">
                             <span class="slider round"></span>
+                            <span class="switch-text">Web search</span>
                         </label>
-                    </div>
-                    <button class="i-btn" id="img-btn">+Upload</button>
-                    <input type="file" id="img-input" accept="image/*" multiple style="display:none" />
-                    <div style="grid-area: abort-btn; display: flex; justify-content: center; align-items: center;">
-                        <button class="control-btn" id="control-btn"><img id="control-img" src="../../assets/arrow-right-long-solid-full.svg" style="height: 18px; width: 18px;"></i></button>
+
+                        <div class="composer-spacer"></div>
+
+                        <button class="control-btn" id="control-btn" aria-label="Send message">
+                            <img id="control-img" src="../../assets/arrow-right-long-solid-full.svg" alt="">
+                        </button>
                     </div>
                 </div>
-           
             </section>
-            
+            <nav class="turns-col" aria-label="Conversation turns" hidden>
+                <div class="turn-map">
+                    <div class="turn-map-bars"></div>
+                    <div class="turn-map-list" role="group" aria-label="Turn previews"></div>
+                </div>
+            </nav>
         </section>
-        <section class="sidebar">
-            <button class="col-btn" id="btn" >
-                <img src="../../assets/bars-solid-full.svg" style="height: 20px;"></i>
-
-
-            </button>
-            <button class="new-btn" id="btn">
-                <img src="../../assets/plus-solid-full.svg" style="height: 20px;"></i>
-
-
-            </button>
-
-            <section class="sb-container">
-                
-                
-            </section>
-
-            <button class="save-btn" id="save-btn">
-                <img src="../../assets/floppy-disk-regular-full.svg" style="height: 25px;">
-            </button>
-
-
-
-        </section>
-
-
-
-
-
     </div>
 <script src="../javascript/index.js"></script>
 
