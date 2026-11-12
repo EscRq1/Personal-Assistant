@@ -27,19 +27,20 @@ from starlette.requests import Request, ClientDisconnect
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 log = logging.getLogger(__name__)
-MAX_FILES = 20
+MAX_FILES = 20 * 1024
 MAX_FILE_BYTES = 32 * 1024 * 1024
 MAX_TOTAL_BYTES = 128 * 1024 * 1024
 MAX_BODY_BYTES = MAX_TOTAL_BYTES + 1024 * 1024
-MAX_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_BYTES = 16 * 1024 * 1024 
 MAX_IMAGES_BYTES = 32 * 1024 * 1024
-CHUNK_BYTES = 256 * 1024
+CHUNK_BYTES = 256 * 1024 * 1024
 VISION_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"}
 RESERVED_NAMES = {".git", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", "node_modules"}
 MAX_PACKAGE_BODY_BYTES = (
     MAX_CACHE_BYTES
-    + 8 * 1024 * 1024
+    + 8 * 1024 * 1024 
 )
+
 
 
 class UploadError(Exception):
