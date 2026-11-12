@@ -174,6 +174,8 @@ SANDBOX_INSTALL_SCHEMA: dict[str, Any] = {
             "the provided session_id and manual_script exactly as returned. Ask the user "
             "to run that script. Do not attempt another download or network method yourself. "
             "Reset removes this environment. Default installation timeout is 120 seconds."
+            "If you require an OCR, your preinstalled module is TesseractOCR."
+            "Install pytesseract package to use it in the sandbox"
         ),
         "parameters": {
             "type": "object",
