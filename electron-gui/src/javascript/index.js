@@ -81,13 +81,15 @@ function setBusy(busy) {
 // Cycle shimmer color each pass
 const shimmerColors = ['#c7d2fe', '#a7f3d0', '#fde68a', '#fca5a5'];
 let shimmerIdx = 0;
-const thinkingLabel = document.querySelector('.thinking-label');
-if (thinkingLabel) {
-    thinkingLabel.addEventListener('animationiteration', () => {
-        shimmerIdx = (shimmerIdx + 1) % shimmerColors.length;
-        thinkingLabel.style.setProperty('--shimmer-color', shimmerColors[shimmerIdx]);
-    });
-}
+
+const svgStyle = document.createElement("style");
+svgStyle.textContent = `
+    img[src$=".svg"] {
+        filter: brightness(0) saturate(100%) invert(100%);
+    }
+`;
+
+document.head.appendChild(svgStyle);
 
 /* ------------------------------------------------------------------- saving */
 
@@ -1060,28 +1062,39 @@ function createThinkingBubble(parent) {
     const spinner = document.createElement("span");
     spinner.className = "thinking-icon thinking-spark";
     spinner.appendChild(createSparkSvg());
+    
     const labelEl = document.createElement("span");
     labelEl.className = "thinking-label";
     labelEl.textContent = "Thinking";
+    labelEl.addEventListener('animationiteration', () => {
+        shimmerIdx = (shimmerIdx + 1) % shimmerColors.length;
+        labelEl.style.setProperty('--shimmer-color', shimmerColors[shimmerIdx]);
+    });
     const chevron = document.createElement("span");
     chevron.className = "thinking-chevron";
     header.append(spinner, labelEl, chevron);
+
     const body = document.createElement("div");
     body.className = "thinking-body";
     body.id = `thinking-body-${currentGenerationId}`;
+
     const text = document.createElement("div");
     text.className = "thinking-text";
     body.appendChild(text);
+
     // Footer row, like AI Studio ("Expand to see model thoughts" /
     // "Collapse to hide model thoughts").
     const footer = document.createElement("button");
     footer.type = "button";
     footer.className = "thinking-footer";
     footer.hidden = true;
+
     const footerText = document.createElement("span");
     footerText.className = "thinking-footer-text";
+
     const footerChevron = document.createElement("span");
     footerChevron.className = "thinking-footer-chevron";
+
     footer.append(footerText, footerChevron);
     bubble.append(header, body, footer);
     parent.appendChild(bubble);
