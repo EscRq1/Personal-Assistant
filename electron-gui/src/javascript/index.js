@@ -8,6 +8,7 @@ const delBtn = document.getElementById("del-btn");
 const menu = document.getElementById("chat-menu");
 const outputDiv = document.querySelector(".output");
 const header = document.getElementById("sum-header");
+const headerSnippet = document.getElementById("sum-snippet");
 const ain = document.getElementById("ai-input");
 const imgBtn = document.getElementById("img-btn");
 const imgInput = document.getElementById("img-input");
@@ -45,24 +46,17 @@ let isSearching = false;
 let pendingAttachments = [];
 let menuOpen = false;
 let stickToBottom = true;
-
-/* Turn mini-map state */
-let turnMapEl = null;
-let turnMapBarsEl = null;
-let turnMapListEl = null;
-let turnBars = [];
-let turnObserver = null;
-let visibleTurns = new Map();
-let turnScrollRoot = document.querySelector(".content") || outputDiv;
-let turnMapMO = null;
-let turnMapBuildFrame = null;
-let turnMapScrollFrame = null;
-let activeTurnIndex = -1;
-let turnIdCounter = 0;
+let titleRevision = 0;
 
 const isEmpty = () => outputDiv.children.length === 0;
 
 const API = "http://localhost:5000";
+
+function setChatHeading(title, snippet) {
+    header.textContent = title;
+    headerSnippet.textContent = snippet;
+    titleRevision++;
+}
 
 /* ignoreNavigation: for use INSIDE loadChat, where navigationInFlight is
    deliberately set by us and must not count as "busy". */
@@ -82,6 +76,17 @@ function setBusy(busy) {
     }
 
     document.body.style.cursor = busy ? "progress" : "default";
+}
+
+// Cycle shimmer color each pass
+const shimmerColors = ['#c7d2fe', '#a7f3d0', '#fde68a', '#fca5a5'];
+let shimmerIdx = 0;
+const thinkingLabel = document.querySelector('.thinking-label');
+if (thinkingLabel) {
+    thinkingLabel.addEventListener('animationiteration', () => {
+        shimmerIdx = (shimmerIdx + 1) % shimmerColors.length;
+        thinkingLabel.style.setProperty('--shimmer-color', shimmerColors[shimmerIdx]);
+    });
 }
 
 /* ------------------------------------------------------------------- saving */
@@ -186,13 +191,7 @@ async function loadSidebarHistory() {
             div.addEventListener("click", async event => {
                 if (event.target.closest(".menu-btn") || isBusy()) return;
 
-                header.innerText = item.title || "Legacy Chat";
-                header.style.setProperty(
-                    "--snippet",
-                    JSON.stringify(item.snippet || "No summary available")
-                );
-
-                await loadChat(id);
+                await loadChat(id, item.title, item.snippet);
             });
 
             fragment.appendChild(div);
@@ -244,21 +243,22 @@ function askRename() {
 
         const modal = document.createElement("div");
         Object.assign(modal.style, {
-            background: "#fff",
+            background: "#2d2e30",
+            color: "#e8eaed",
             padding: "24px 22px",
             borderRadius: "14px",
             boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
             zIndex: "99999",
             minWidth: "320px",
-            fontFamily: "system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
+            fontFamily: "\"SN Pro\", system-ui, -apple-system, Segoe UI, Roboto, sans-serif"
         });
 
         modal.innerHTML = `
             <div style="font-weight:600;margin-bottom:12px;font-size:15px">Rename chat</div>
-            <input id="rename-input" placeholder="New chat name" style="width:100%;padding:10px 12px;border:1px solid #e2e2e2;border-radius:8px;outline:none;font-size:14px;margin-bottom:14px;box-sizing:border-box">
+            <input id="rename-input" placeholder="New chat name" style="width:100%;padding:10px 12px;border:1px solid #3c4043;background:#35363a;color:#e8eaed;border-radius:8px;outline:none;font-size:14px;margin-bottom:14px;box-sizing:border-box">
             <div style="display:flex;gap:8px;justify-content:flex-end">
-                <button id="rename-cancel" style="padding:8px 14px;border:1px solid #e2e2e2;background:#f7f7f7;border-radius:8px;cursor:pointer;font-size:13px">Cancel</button>
-                <button id="rename-ok" style="padding:8px 16px;border:none;background:#111;color:#fff;border-radius:8px;cursor:pointer;font-size:13px">OK</button>
+                <button id="rename-cancel" style="padding:8px 14px;border:1px solid #3c4043;background:#35363a;color:#e8eaed;border-radius:8px;cursor:pointer;font-size:13px">Cancel</button>
+                <button id="rename-ok" style="padding:8px 16px;border:none;background:#8ab4f8;color:#17171a;border-radius:8px;cursor:pointer;font-size:13px">OK</button>
             </div>`;
 
         overlay.appendChild(modal);
@@ -313,6 +313,7 @@ async function chatMenu(type) {
             const response = await fetch(`${API}/rename`, { method: "POST", body: form });
             if (!response.ok) throw new Error(`Rename request failed: ${response.status}`);
 
+            if (id === currentChatId) setChatHeading(newName, headerSnippet.textContent);
             await loadSidebarHistory();
         } else if (type === 2) {
             const form = new FormData();
@@ -348,7 +349,7 @@ async function chatMenu(type) {
 
 /* -------------------------------------------------------------- navigation */
 
-async function loadChat(chatId) {
+async function loadChat(chatId, title, snippet) {
     if (isBusy()) return;
 
     const requestedChatId = String(chatId);
@@ -381,6 +382,7 @@ async function loadChat(chatId) {
             if (loadId !== chatLoadGeneration) return;
 
             currentChatId = requestedChatId;
+            setChatHeading(title || "Legacy Chat", snippet || "No summary available.");
             isHistory = true;
             stickToBottom = true;
             outputDiv.replaceChildren();
@@ -394,10 +396,6 @@ async function loadChat(chatId) {
 
             if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
 
-            // The stored chat has now been fully materialized. Build the turn
-            // map immediately instead of relying only on MutationObserver/rAF.
-            refreshTurnMapNow();
-
         } catch (err) {
             console.error("Chat load failed:", err);
         }
@@ -407,7 +405,6 @@ async function loadChat(chatId) {
 
     try {
         await navTask;
-        refreshTurnMap();
     } finally {
         // Identity check, not generation check: resetChat()/a newer load may have
         // bumped chatLoadGeneration while we awaited. Clearing on generation left
@@ -423,13 +420,11 @@ function resetChat() {
     stickToBottom = true;
     clearInputUI();
 
-    header.innerText = "New Chat";
-    header.style.setProperty("--snippet", '"Ask something to start a new chat"');
+    setChatHeading("New chat", "Ask something to start a new chat");
 
     isHistory = false;
     currentChatId = null;
     currentDraftId = crypto.randomUUID();
-    refreshTurnMapNow();
 }
 
 newBtn.addEventListener("click", async () => {
@@ -445,8 +440,7 @@ newBtn.addEventListener("click", async () => {
 
 document.getElementById("btn").addEventListener("click", () => {
     isCollapsed = !isCollapsed;
-    container.style.gridTemplateColumns = isCollapsed ? "70px 1fr" : "300px 1fr";
-    newBtn.style.display = isCollapsed ? "none" : "flex";
+    container.style.setProperty("--sidebar-width", isCollapsed ? "70px" : "min(300px, 48vw)");
     chatList.style.display = isCollapsed ? "none" : "block";
 });
 
@@ -575,9 +569,6 @@ function appendStoredMessage(output, role, content = "", shouldScroll = true) {
         body.className = "stored-user-text";
         body.textContent = cleanText;
         text.appendChild(body);
-    } else {
-        // Image-only stored turn: mark it so previews can label it.
-        message.classList.add("pics-only");
     }
 
     message.append(meta, text);
@@ -646,6 +637,7 @@ function setGenerationUI(active) {
     if (active) {
         controlImg.src = "../../assets/square-solid-full.svg";
         controlBtn.style.setProperty("--snippet", '"Stop answering"');
+        controlBtn.setAttribute("aria-label", "Stop answering");
         controlBtn.disabled = isStopping;
         ain.disabled = false;
         imgBtn.disabled = true;
@@ -654,6 +646,7 @@ function setGenerationUI(active) {
     } else {
         controlImg.src = "../../assets/arrow-right-long-solid-full.svg";
         controlBtn.style.setProperty("--snippet", '"Send message"');
+        controlBtn.setAttribute("aria-label", "Send message");
         controlBtn.disabled = false;
         ain.disabled = imgBtn.disabled = toggleInput.disabled = isSaving || isStopping;
         controlBtn.onclick = send;
@@ -717,8 +710,6 @@ function appendLiveUserTurn(output, query, files, shouldScroll = true) {
         body.className = "stored-user-text";
         body.textContent = cleanQuery;
         text.appendChild(body);
-    } else if (files.length) {
-        message.classList.add("pics-only");
     }
 
     message.append(meta, text);
@@ -763,6 +754,8 @@ async function sendMessage() {
 
     const requestChatId = currentChatId;
     const requestDraftId = currentDraftId;
+    const requestTitleRevision = titleRevision;
+    const startedAt = performance.now();
     let requestAccepted = false;
 
     setGenerationUI(true);
@@ -773,6 +766,7 @@ async function sendMessage() {
     const loading = document.createElement("div");
     loading.id = loadingId;
     loading.className = "msg assistant thinking";
+    if (generationFiles.length) loading.classList.add("uploading");
     loading.textContent = generationFiles.length
         ? "Uploading attachments..."
         : "Thinking";
@@ -791,7 +785,7 @@ async function sendMessage() {
         const wrapper = document.createElement("div");
         wrapper.className = "msg assistant thinking-wrap";
         outputDiv.appendChild(wrapper);
-        workingBubble = createWorkingBubble(wrapper);
+        workingBubble = createWorkingBubble(wrapper, startedAt);
         if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
         return workingBubble;
     }
@@ -800,7 +794,7 @@ async function sendMessage() {
     function ensureThinkingBubble() {
         if (thinkingBubble) return thinkingBubble;
         const wrapper = ensureWorkingBubble().bubble.parentElement;
-        thinkingBubble = createThinkingBubble(wrapper, loading.textContent);
+        thinkingBubble = createThinkingBubble(wrapper);
         return thinkingBubble;
     }
 
@@ -822,7 +816,7 @@ async function sendMessage() {
         if (requestChatId) form.append("chat_id", requestChatId);
         else form.append("draft_id", requestDraftId);
 
-        ensureThinkingBubble();
+        if (!generationFiles.length) ensureThinkingBubble();
 
         const response = await fetch(`${API}/ask`, {
             method: "POST",
@@ -840,6 +834,7 @@ async function sendMessage() {
         }
 
         requestAccepted = true;
+        ensureThinkingBubble();
         if (!response.body) throw new Error("Response body is not streamable");
 
         let fullResponse = "";
@@ -882,7 +877,6 @@ async function sendMessage() {
                 const reasoning = packet.reasoning;
                 if (reasoning) {
                     ensureThinkingBubble().append(reasoning);
-                    return false;
                 }
 
                 const token = packet.token;
@@ -965,13 +959,9 @@ async function sendMessage() {
             }
 
             const summaryBlock = await sumRes.json();
-            header.innerText = summaryBlock.title || "New Chat";
-            header.style.setProperty(
-                "--snippet",
-                JSON.stringify(
-                    summaryBlock.snippet || "No summary available."
-                )
-            );
+            if (generationId === currentGenerationId && requestTitleRevision === titleRevision) {
+                setChatHeading(summaryBlock.title || "New chat", summaryBlock.snippet || "No summary available.");
+            }
         } catch (summaryError) {
             console.warn("Summary update failed:", summaryError);
         }
@@ -993,7 +983,6 @@ async function sendMessage() {
         }
 
         if (err?.name === "AbortError" || controller.signal.aborted) {
-            if (thinkingBubble) thinkingBubble.finish();
             loading.remove();
             console.log("Generation stopped by user.");
 
@@ -1010,6 +999,8 @@ async function sendMessage() {
         }
 
         if (loading.isConnected) {
+            loading.classList.remove("uploading");
+            loading.classList.add("error");
             loading.textContent =
                 `Error: ${err?.message || "Request failed."}`;
         } else {
@@ -1021,7 +1012,6 @@ async function sendMessage() {
         console.error(err);
     } finally {
         if (generationId === currentGenerationId) {
-            refreshTurnMap();
             currentAbortController = null;
             setGenerationUI(false);
         }
@@ -1039,72 +1029,12 @@ function formatWorkTime(ms) {
     return `${s}s`;
 }
 
-function createThinkingBubble(parent, label = "Thinking") {
-    if (!document.getElementById("thinking-tool-call-styles")) {
-        const style = document.createElement("style");
-        style.id = "thinking-tool-call-styles";
-        style.textContent = `
-            .thinking-tool-call {
-                display: block; margin: 10px 0; padding: 10px 12px;
-                border: 1px solid #a5a0ed; border-left: 4px solid #7564d9;
-                border-radius: 8px; background: rgba(117, 100, 217, .10);
-                color: inherit; font-style: normal; white-space: normal;
-            }
-            .thinking-tool-call-title { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-            .thinking-tool-call-name { font-weight: 700; color: #7564d9; overflow-wrap: anywhere; }
-            .thinking-tool-call-number { font-size: .85em; opacity: .75; }
-            .thinking-tool-call-summary { margin-top: 5px; white-space: pre-wrap; overflow-wrap: anywhere; }
-            .thinking-tool-call details { margin-top: 7px; }
-            .thinking-tool-call summary { cursor: pointer; font-weight: 500; }
-            .thinking-tool-call pre {
-                margin: 7px 0 0; max-height: 220px; overflow: auto;
-                white-space: pre-wrap; overflow-wrap: anywhere; font-size: .95em;
-            }
-            .thinking-reasoning-segment { white-space: pre-wrap; }
-            .thinking-stage-note {
-                margin: 12px 0;
-                padding: 0 0 6px;
-                border: 0;
-                border-bottom: 1px solid #aaa;
-                border-radius: 0;
-                background: transparent;
-
-                font-weight: 600;
-                font-style: normal;
-                color: inherit;
-                white-space: pre-wrap;
-                overflow-wrap: anywhere;
-            }
-            .thinking-tool-icon {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-
-                width: 16px;
-                height: 16px;
-                flex-shrink: 0;
-
-                font-size: 15px;
-                font-style: normal;
-                line-height: 1;
-
-                border: none;
-                background: transparent;
-                animation: none;
-            }
-
-            .thinking-tool-icon img {
-                display: block;
-                width: 100%;
-                height: 100%;
-                object-fit: contain;
-            }
-
-            .thinking-bubble:not(.active) .thinking-tool-icon {
-                display: none;
-            }
-        `;
-        document.head.appendChild(style);
+function createThinkingBubble(parent) {
+    const SPARK_SVG = '<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" fill="currentColor"><path d="M12 2.5l1.9 5.6a2 2 0 0 0 1.26 1.26l5.6 1.9-5.6 1.9a2 2 0 0 0-1.26 1.26L12 20.5l-1.9-5.6a2 2 0 0 0-1.26-1.26L3.24 11.78l5.6-1.9a2 2 0 0 0 1.26-1.26L12 2.5z"/></svg>';
+    function createSparkSvg() {
+        const t = document.createElement("template");
+        t.innerHTML = SPARK_SVG.trim();
+        return t.content.firstElementChild;
     }
 
     const TOOL_ICONS = new Map([
@@ -1120,84 +1050,118 @@ function createThinkingBubble(parent, label = "Thinking") {
 
     const bubble = document.createElement("div");
     bubble.className = "thinking-bubble active";
-    const header = document.createElement("div");
+    const header = document.createElement("button");
+    header.type = "button";
     header.className = "thinking-header";
-    header.setAttribute("role", "button");
-    header.setAttribute("tabindex", "0");
-    header.setAttribute("aria-expanded", "false");
+    header.disabled = true;
+    // AI-Studio style spark icon (kept as "spinner" so existing JS/CSS
+    // hooks still apply). It shimmers while active and holds a tool icon
+    // when the model is running a tool.
     const spinner = document.createElement("span");
-    spinner.className = "thinking-spinner";
+    spinner.className = "thinking-icon thinking-spark";
+    spinner.appendChild(createSparkSvg());
     const labelEl = document.createElement("span");
     labelEl.className = "thinking-label";
-    labelEl.textContent = label;
+    labelEl.textContent = "Thinking";
     const chevron = document.createElement("span");
     chevron.className = "thinking-chevron";
     header.append(spinner, labelEl, chevron);
     const body = document.createElement("div");
     body.className = "thinking-body";
+    body.id = `thinking-body-${currentGenerationId}`;
     const text = document.createElement("div");
     text.className = "thinking-text";
     body.appendChild(text);
-    bubble.append(header, body);
+    // Footer row, like AI Studio ("Expand to see model thoughts" /
+    // "Collapse to hide model thoughts").
+    const footer = document.createElement("button");
+    footer.type = "button";
+    footer.className = "thinking-footer";
+    footer.hidden = true;
+    const footerText = document.createElement("span");
+    footerText.className = "thinking-footer-text";
+    const footerChevron = document.createElement("span");
+    footerChevron.className = "thinking-footer-chevron";
+    footer.append(footerText, footerChevron);
+    bubble.append(header, body, footer);
     parent.appendChild(bubble);
 
     let finished = false;
     let reasoningSegment = null;
-    let callCount = 0;
-    const scroll = () => {
-        if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
-    };
-    const toggle = () => {
-        const open = bubble.classList.toggle("open");
+    let lastLoggedStage = null;
+
+    function setOpen(open) {
+        bubble.classList.toggle("open", open);
+        body.hidden = !open;
         header.setAttribute("aria-expanded", String(open));
-    };
-    header.addEventListener("click", toggle);
-    header.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            toggle();
+        footer.setAttribute("aria-expanded", String(open));
+        footerText.textContent = open
+            ? "Collapse to hide model thoughts"
+            : "Expand to see model thoughts";
+    }
+
+    setOpen(false);
+    for (const button of [header, footer]) {
+        button.setAttribute("aria-controls", body.id);
+        button.addEventListener("click", () => setOpen(body.hidden));
+    }
+
+    function updateAfterAppend(followReasoning) {
+        if (!bubble.classList.contains("has-content")) {
+            bubble.classList.add("has-content");
+            header.disabled = false;
+            footer.hidden = false;
+            setOpen(true);
+            followReasoning = true;
         }
-    });
+        if (followReasoning) body.scrollTop = body.scrollHeight;
+        if (stickToBottom) outputDiv.scrollTop = outputDiv.scrollHeight;
+    }
+
+    const isFollowingReasoning = () => !body.hidden &&
+        body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
 
     return {
-        bubble, header, labelEl, text,
         setStage(stage, tool = "") {
             if (finished || typeof stage !== "string") return;
 
-            labelEl.textContent = stage.trim() || "Thinking";
+            // AI Studio keeps the header label as the shimmering "Thinking";
+            // the live stage text is surfaced as a note inside the body
+            // (see appendStage) rather than overwriting the header.
+            labelEl.textContent = "Thinking";
 
             const toolName = typeof tool === "string" ? tool.trim() : "";
 
-            spinner.replaceChildren();
-
             if (toolName) {
-                spinner.className = "thinking-tool-icon";
+                // Model is running a tool: show its icon in the header.
+                spinner.className = "thinking-icon thinking-tool-icon";
                 spinner.title = toolName;
-
                 const icon = document.createElement("img");
                 icon.src = TOOL_ICONS.get(toolName)
                     || "../../assets/wrench-solid-full.svg";
-
                 icon.alt = "";
                 icon.draggable = false;
-
-                spinner.appendChild(icon);
+                spinner.replaceChildren(icon);
             } else {
-                spinner.className = "thinking-spinner";
+                // No tool: restore the shimmering "Thinking" spark.
+                spinner.className = "thinking-icon thinking-spark";
                 spinner.removeAttribute("title");
+                spinner.replaceChildren(createSparkSvg());
             }
 
             spinner.setAttribute("aria-hidden", "true");
         },
         append(chunk) {
             if (finished || typeof chunk !== "string" || !chunk) return;
+            const followReasoning = isFollowingReasoning();
             if (!reasoningSegment) {
                 reasoningSegment = document.createElement("div");
                 reasoningSegment.className = "thinking-reasoning-segment";
+                reasoningSegment.appendChild(document.createTextNode(""));
                 text.appendChild(reasoningSegment);
             }
-            reasoningSegment.appendChild(document.createTextNode(chunk));
-            scroll();
+            reasoningSegment.firstChild.appendData(chunk);
+            updateAfterAppend(followReasoning);
         },
         appendStage(stage, tool = "") {
             if (finished || typeof stage !== "string") return;
@@ -1205,8 +1169,8 @@ function createThinkingBubble(parent, label = "Thinking") {
             const cleaned = stage.trim();
             const key = JSON.stringify([tool, cleaned]);
 
-            if (!cleaned || key === this._lastLoggedStage) return;
-            this._lastLoggedStage = key;
+            if (!cleaned || key === lastLoggedStage) return;
+            lastLoggedStage = key;
 
             // Keep generic thinking states in the header only.
             const normalized = cleaned
@@ -1229,19 +1193,19 @@ function createThinkingBubble(parent, label = "Thinking") {
                 ? `[${tool}] ${cleaned}`
                 : cleaned;
 
+            const followReasoning = isFollowingReasoning();
             text.appendChild(note);
             reasoningSegment = null;
-
-            bubble.classList.add("has-content");
-            scroll();
+            updateAfterAppend(followReasoning);
         },
         finish() {
             if (finished) return;
             finished = true;
             bubble.classList.remove("active");
-            if (callCount || text.textContent.trim()) {
-                labelEl.textContent = "Chain-Of-Thoughts";
-                bubble.classList.add("has-content");
+            if (text.textContent.trim()) {
+                spinner.className = "thinking-icon thinking-spark";
+                spinner.removeAttribute("title");
+                spinner.replaceChildren(createSparkSvg());
             } else {
                 bubble.remove();
             }
@@ -1251,7 +1215,7 @@ function createThinkingBubble(parent, label = "Thinking") {
 
 
 
-function createWorkingBubble(parent) {
+function createWorkingBubble(parent, startedAt) {
     const bubble = document.createElement("div");
     bubble.className = "working-note";
 
@@ -1262,7 +1226,6 @@ function createWorkingBubble(parent) {
     bubble.append(labelEl);
     parent.appendChild(bubble);
 
-    const startedAt = performance.now();
     let stopped = false;
 
     const timer = setInterval(() => {
@@ -1317,6 +1280,7 @@ async function stopAnswering() {
     controlBtn.disabled = true;
     controlImg.src = "../../assets/square-solid-full.svg";
     controlBtn.style.setProperty("--snippet", '"Stopping..."');
+    controlBtn.setAttribute("aria-label", "Stopping");
 
     try { controller.abort(); } catch { }
 
@@ -1347,8 +1311,8 @@ imgBtn.title = "Attach files";
 imgBtn.setAttribute("aria-label", "Attach files");
 
 const MAX_ATTACHMENT_FILES = 20;
-const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
-const MAX_ATTACHMENTS_BYTES = 128 * 1024 * 1024;
+const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024
+const MAX_ATTACHMENTS_BYTES = 128 * 1024 * 1024
 const MAX_IMAGE_BYTES = 16 * 1024 * 1024;
 const MAX_IMAGES_BYTES = 32 * 1024 * 1024;
 const PREVIEW_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"]);
@@ -1536,507 +1500,177 @@ document.addEventListener("keydown", event => {
     setMenu(false);
 });
 
-/* ============================================================================
-   TURN MINI-MAP
+/* -------------------------------------------------------------- turn map */
 
-   One logical bar per user turn. A turn is represented by exactly one
-   .msg.user bubble, including text + attachments. The active bar is derived
-   from the user's scroll position rather than IntersectionObserver ratios.
-   ========================================================================== */
-
-/* Injected so the feature works even if style.css / index.html were not
-   updated. Move to style.css and delete this block if you prefer. */
-
-const TURN_MAP_CSS = `
-.turns-col{
-    grid-area: list;
-    position: relative;
-    height: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: flex-end;
-    padding: 0 10px;
-    overflow: visible;
-}
-
-.turn-map{
-    position: relative;
-    align-self: center;
-    display: flex;
-    align-items: center;
-    padding: 8px 4px;
-    z-index: 60;
-}
-
-/* Invisible bridge keeps the parent hovered while the pointer moves from
-   the fixed bars into the absolutely-positioned list. */
-.turn-map::before{
-    content: "";
-    position: absolute;
-    top: -12px;
-    left: -300px;
-    width: 300px;
-    height: calc(100% + 24px);
-    z-index: 1;
-}
-
-.turn-map-bars{
-    position: relative;
-    z-index: 2;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-    align-items: flex-end;
-}
-
-.turn-bar{
-    width: 22px;
-    height: 3px;
-    border-radius: 2px;
-    background: rgba(128,128,128,.28);
-    cursor: pointer;
-    transition: width .15s ease, background .15s ease, height .15s ease;
-}
-
-.turn-bar:hover{
-    width: 28px;
-    background: rgba(60,60,60,.55);
-}
-
-.turn-bar.active{
-    width: 28px;
-    height: 5px;
-    background: rgba(0,0,0,.82);
-}
-
-.turn-map-list{
-    position: absolute;
-    z-index: 3;
-    right: calc(100% + 8px);
-    top: 50%;
-    transform: translateY(-50%);
-    width: 280px;
-    max-height: min(360px, 50vh);
-    overflow-y: auto;
-    overscroll-behavior: contain;
-    padding: 6px;
-    border-radius: 10px;
-    border: 1px solid rgba(128,128,128,.25);
-    background: #ffffff;
-    box-shadow: 0 10px 28px rgba(0,0,0,.18);
-    opacity: 0;
-    visibility: hidden;
-    transition: opacity .18s ease, visibility .18s ease;
-    pointer-events: none;
-}
-
-.turn-map:hover .turn-map-list,
-.turn-map-list:hover{
-    opacity: 1;
-    visibility: visible;
-    pointer-events: auto;
-}
-
-.turn-map-empty{
-    padding: 8px 10px;
-    font-size: 12px;
-    opacity: .5;
-}
-
-.turn-map-item{
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 7px 9px;
-    border: 0;
-    border-radius: 7px;
-    background: transparent;
-    color: inherit;
-    cursor: pointer;
-    font: inherit;
-    font-size: 12.5px;
-    text-align: left;
-}
-
-.turn-map-item:hover,
-.turn-map-item:focus-visible{
-    background: rgba(128,128,128,.14);
-    outline: none;
-}
-
-.turn-map-item.active{
-    background: rgba(33,150,243,.16);
-}
-
-.turn-map-item .tm-idx{
-    flex: 0 0 auto;
-    min-width: 18px;
-    font-size: 10.5px;
-    opacity: .5;
-    font-variant-numeric: tabular-nums;
-}
-
-.turn-map-item .tm-preview{
-    flex: 1 1 auto;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-@media (max-width: 640px){
-    .turn-bar{ width: 16px; }
-    .turn-bar:hover,
-    .turn-bar.active{ width: 20px; }
-    .turn-map-list{ width: 220px; }
-}
-`;
-
-function injectTurnMapStyles() {
-    if (document.getElementById("turn-map-styles")) return;
-
-    const style = document.createElement("style");
-    style.id = "turn-map-styles";
-    style.textContent = TURN_MAP_CSS;
-    document.head.appendChild(style);
-}
-
-function ensureTurnMapMarkup() {
-    let col = document.querySelector(".turns-col") || document.getElementById("turns-col");
-
-    if (!col) {
-        col = document.createElement("div");
-        col.className = "turns-col";
-        col.id = "turns-col";
-
-        const content = document.querySelector(".content");
-        if (!content) return null;
-        content.appendChild(col);
-    }
-
-    const existing = col.querySelector(".turn-map");
-    if (existing) {
-        turnMapEl = existing;
-        turnMapBarsEl = existing.querySelector(".turn-map-bars");
-        turnMapListEl = existing.querySelector(".turn-map-list");
-
-        if (turnMapBarsEl && turnMapListEl) return true;
-    }
-
-    col.querySelectorAll(".turns-anchor, .turns-toggle, .turns-popover").forEach(el => el.remove());
-
-    const map = document.createElement("div");
-    map.className = "turn-map";
-    map.id = "turnMap";
-    map.setAttribute("aria-label", "Turn mini-map");
-
-    const bars = document.createElement("div");
-    bars.className = "turn-map-bars";
-    bars.id = "turnMapBars";
-
-    const list = document.createElement("div");
-    list.className = "turn-map-list";
-    list.id = "turnMapList";
-    list.setAttribute("role", "listbox");
-    list.setAttribute("aria-label", "Turns in this conversation");
-
-    map.append(bars, list);
-    col.appendChild(map);
-
-    turnMapEl = map;
-    turnMapBarsEl = bars;
-    turnMapListEl = list;
-
-    return true;
-}
-
-function previewFromBubble(bubble) {
-    const clone = bubble.cloneNode(true);
-    clone.querySelectorAll(
-        ".meta, .image-list, .msg-meta, .msg-actions, .msg-images, .msg-loading"
-    ).forEach(el => el.remove());
-
-    const text = (clone.textContent || "").replace(/\s+/g, " ").trim();
-    if (!text) return bubble.classList.contains("pics-only") ? "📎 Image" : "";
-
-    return text.length > 80 ? text.slice(0, 80) + "\u2026" : text;
-}
+const turnsColumn = document.querySelector(".turns-col");
+const turnMapBars = turnsColumn.querySelector(".turn-map-bars");
+const turnMapList = turnsColumn.querySelector(".turn-map-list");
+let turns = [];
+let activeTurnIndex = -1;
+let activeTurnFrame = null;
+let turnJump = null;
 
 function getTurnPreview(bubble) {
-    const preview = previewFromBubble(bubble);
-    return preview || "Turn";
+    const body = bubble.querySelector(".stored-user-text");
+    const content = bubble.querySelector(".text");
+    const attachment = content?.querySelector(".sandbox-file-name, .message-image, .image-missing");
+    const text = (body?.textContent || (!attachment && content?.textContent) || "")
+        .replace(/\s+/g, " ").trim();
+
+    if (text) return text.length > 80 ? text.slice(0, 80) + "…" : text;
+    if (attachment?.classList.contains("sandbox-file-name")) return attachment.textContent;
+    return attachment ? "Attached image" : "Turn";
 }
 
 function setActiveTurn(index) {
     if (index === activeTurnIndex) return;
 
-    activeTurnIndex = index;
+    const previous = turns[activeTurnIndex];
+    previous?.bar.classList.remove("active");
+    previous?.item.removeAttribute("aria-current");
 
-    turnBars.forEach((tb, i) => {
-        const active = i === activeTurnIndex;
-        tb.bar.classList.toggle("active", active);
-        tb.item.classList.toggle("active", active);
-    });
+    activeTurnIndex = index;
+    const current = turns[index];
+    if (!current) return;
+    current.bar.classList.add("active");
+    current.item.setAttribute("aria-current", "true");
+
+    // Keep the active marker in view while reading the transcript.
+    if (!turnsColumn.matches(":hover") && !turnsColumn.contains(document.activeElement)) {
+        const bar = current.bar.getBoundingClientRect();
+        const rail = turnMapBars.getBoundingClientRect();
+        if (bar.top < rail.top) turnMapBars.scrollTop += bar.top - rail.top;
+        else if (bar.bottom > rail.bottom) turnMapBars.scrollTop += bar.bottom - rail.bottom;
+    }
 }
 
 function updateActiveTurn() {
-    if (!turnBars.length) {
-        setActiveTurn(-1);
-        return;
-    }
-
-    if (visibleTurns.size === 0) {
-        // Fallback: no IO data yet — pick the last bubble whose top is
-        // above the 35% reference line (your original fallback logic).
-        const rootRect = turnScrollRoot.getBoundingClientRect();
-        const referenceY = rootRect.top + Math.min(rootRect.height * 0.35, 220);
-
-        let bestIdx = 0;
-        for (let i = 0; i < turnBars.length; i++) {
-            if (turnBars[i].bubble.getBoundingClientRect().top <= referenceY) bestIdx = i;
-            else break;
+    if (!turns.length) return;
+    if (turnJump) {
+        const index = turns.findIndex(turn => turn.bubble === turnJump.bubble);
+        if (index !== -1) {
+            setActiveTurn(index);
+            return;
         }
-        setActiveTurn(bestIdx);
+    }
+
+    const maxScroll = outputDiv.scrollHeight - outputDiv.clientHeight;
+    if (maxScroll > 1 && outputDiv.scrollTop >= maxScroll - 1) {
+        setActiveTurn(turns.length - 1);
+        return;
+    }
+    if (outputDiv.scrollTop <= 1) {
+        setActiveTurn(0);
         return;
     }
 
-    // Pick the turn whose vertical center is closest to the viewport center.
-    const rootRect = turnScrollRoot.getBoundingClientRect();
-    const viewportCenter = rootRect.top + rootRect.height / 2;
-
-    let bestIdx  = -1;
-    let bestDist = Infinity;
-
-    for (const [idx] of visibleTurns) {
-        const tb = turnBars[idx];
-        if (!tb) continue;
-        const rect = tb.bubble.getBoundingClientRect();
-        const bubbleCenter = rect.top + rect.height / 2;
-        const dist = Math.abs(bubbleCenter - viewportCenter);
-        if (dist < bestDist) { bestDist = dist; bestIdx = idx; }
+    const viewport = outputDiv.getBoundingClientRect();
+    const referenceY = viewport.top + Math.min(viewport.height * 0.35, 220);
+    // Find the last user message above the reading line.
+    let left = 0;
+    let right = turns.length;
+    while (left < right) {
+        const middle = Math.floor((left + right) / 2);
+        if (turns[middle].bubble.getBoundingClientRect().top <= referenceY) left = middle + 1;
+        else right = middle;
     }
-
-    setActiveTurn(bestIdx);
+    setActiveTurn(Math.max(0, left - 1));
 }
 
 function scheduleActiveTurnUpdate() {
-    if (turnMapScrollFrame !== null) return;
-
-    turnMapScrollFrame = requestAnimationFrame(() => {
-        turnMapScrollFrame = null;
+    if (activeTurnFrame !== null) return;
+    activeTurnFrame = requestAnimationFrame(() => {
+        activeTurnFrame = null;
         updateActiveTurn();
     });
 }
 
+function scrollToUserBubble(bubble) {
+    if (bubble.parentElement !== outputDiv) return;
+
+    const viewport = outputDiv.getBoundingClientRect();
+    const top = outputDiv.scrollTop + bubble.getBoundingClientRect().top - viewport.top - 12;
+    outputDiv.scrollTop = top;
+
+    // Multiple nearby turns may share the same clamped scroll position.
+    // Keep the requested one selected until the transcript moves again.
+    turnJump = { bubble, top: outputDiv.scrollTop };
+    stickToBottom = bubble === turns[turns.length - 1]?.bubble &&
+        outputDiv.scrollHeight - outputDiv.clientHeight - outputDiv.scrollTop <= 1;
+    updateActiveTurn();
+}
+
 function buildTurnMap() {
-    if (!turnMapBarsEl || !turnMapListEl) return;
+    const bubbles = Array.from(outputDiv.children).filter(node => node.matches(".msg.user"));
+    if (turnJump && !bubbles.includes(turnJump.bubble)) turnJump = null;
 
-    const bubbles = Array.from(outputDiv.children).filter(node =>
-        node instanceof HTMLElement && node.classList.contains("msg") && node.classList.contains("user")
-    );
-
-    if (turnObserver) {
-        turnObserver.disconnect();
-        turnObserver = null;
-    }
-
-    visibleTurns.clear();
-    turnMapBarsEl.replaceChildren();
-    turnMapListEl.replaceChildren();
-    turnBars = [];
-
-    bubbles.forEach(bubble => {
+    const bars = document.createDocumentFragment();
+    const items = document.createDocumentFragment();
+    turns = bubbles.map((bubble, index) => {
         const preview = getTurnPreview(bubble);
-        if (!preview) return;
-
-        if (!bubble.dataset.turnId) {
-            bubble.dataset.turnId = `turn-${++turnIdCounter}`;
-        }
-
-        const bar = document.createElement("div");
-        bar.className = "turn-bar";
-        bar.dataset.turnId = bubble.dataset.turnId;
-        bar.setAttribute("role", "button");
-        bar.setAttribute("tabindex", "0");
-
-        const turnNumber = turnBars.length + 1;
-        bar.setAttribute("aria-label", `Go to turn ${turnNumber}: ${preview}`);
-        bar.title = `${turnNumber}. ${preview}`;
-
+        const number = index + 1;
         const navigate = () => scrollToUserBubble(bubble);
+
+        const bar = document.createElement("button");
+        bar.type = "button";
+        bar.className = "turn-bar";
+        bar.setAttribute("aria-label", `Go to turn ${number}: ${preview}`);
         bar.addEventListener("click", navigate);
-        bar.addEventListener("keydown", event => {
-            if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                navigate();
-            }
-        });
+        bars.appendChild(bar);
 
         const item = document.createElement("button");
         item.type = "button";
         item.className = "turn-map-item";
-        item.dataset.turnId = bubble.dataset.turnId;
-        item.setAttribute("role", "option");
-
-        const idx = document.createElement("span");
-        idx.className = "tm-idx";
-        idx.textContent = String(turnNumber);
-
-        const prev = document.createElement("span");
-        prev.className = "tm-preview";
-        prev.textContent = preview;
-
-        item.append(idx, prev);
+        const label = document.createElement("span");
+        label.className = "tm-idx";
+        label.textContent = String(number);
+        const excerpt = document.createElement("span");
+        excerpt.className = "tm-preview";
+        excerpt.textContent = preview;
+        item.append(label, excerpt);
         item.addEventListener("click", navigate);
+        items.appendChild(item);
 
-        turnMapBarsEl.appendChild(bar);
-        turnMapListEl.appendChild(item);
-
-        turnBars.push({ bar, item, bubble, preview, turnId: bubble.dataset.turnId });
+        return { bubble, bar, item };
     });
 
-    if (!turnBars.length) {
-        const empty = document.createElement("div");
-        empty.className = "turn-map-empty";
-        empty.textContent = "No turns yet";
-        turnMapListEl.appendChild(empty);
-        setActiveTurn(-1);
-        return;
-    }
-
-    /* Observe against the viewport. The chat is currently scrolled by .content,
-       so using .output as the observer root would never see those movements. */
-    turnObserver = new IntersectionObserver(entries => {
-        for (const entry of entries) {
-            const idx = Number(entry.target.dataset.turnMapWatch);
-            if (!Number.isInteger(idx)) continue;
-
-            if (entry.isIntersecting) visibleTurns.set(idx, entry.intersectionRatio);
-            else visibleTurns.delete(idx);
-        }
-
-        scheduleActiveTurnUpdate();
-    }, {
-        root: null,
-        rootMargin: "-50px 0px -55% 0px",
-        threshold: [0, 0.1, 0.25, 0.5, 0.75, 1]
-    });
-
-    turnBars.forEach((tb, index) => {
-        tb.bubble.dataset.turnMapWatch = String(index);
-        turnObserver.observe(tb.bubble);
-    });
-
+    turnsColumn.hidden = turns.length === 0;
+    turnMapBars.replaceChildren(bars);
+    turnMapList.replaceChildren(items);
     activeTurnIndex = -1;
     scheduleActiveTurnUpdate();
 }
 
-function refreshTurnMap() {
-    if (!turnMapBarsEl || !turnMapListEl) {
-        if (!ensureTurnMapMarkup()) return;
+const turnLayoutObserver = new ResizeObserver(scheduleActiveTurnUpdate);
+turnLayoutObserver.observe(outputDiv);
+
+const turnMessageObserver = new MutationObserver(mutations => {
+    let userTurnsChanged = false;
+    for (const mutation of mutations) {
+        for (const node of mutation.removedNodes) {
+            if (!(node instanceof Element)) continue;
+            turnLayoutObserver.unobserve(node);
+            if (node.matches(".msg.user")) userTurnsChanged = true;
+        }
+        for (const node of mutation.addedNodes) {
+            if (!(node instanceof Element)) continue;
+            turnLayoutObserver.observe(node);
+            if (node.matches(".msg.user")) userTurnsChanged = true;
+        }
     }
-
-    if (turnMapBuildFrame !== null) return;
-
-    turnMapBuildFrame = requestAnimationFrame(() => {
-        turnMapBuildFrame = null;
-        buildTurnMap();
-    });
-}
-
-function refreshTurnMapNow() {
-    if (!ensureTurnMapMarkup()) return;
-
-    if (turnMapBuildFrame !== null) {
-        cancelAnimationFrame(turnMapBuildFrame);
-        turnMapBuildFrame = null;
-    }
-
-    buildTurnMap();
-}
-
-function scrollToUserBubble(bubble) {
-    if (!bubble || !bubble.isConnected) return;
-
-    const rootRect = turnScrollRoot.getBoundingClientRect();
-    const bubbleRect = bubble.getBoundingClientRect();
-
-    const target = turnScrollRoot.scrollTop +
-        (bubbleRect.top - rootRect.top) - 12;
-
-    stickToBottom = false;
-
-    turnScrollRoot.scrollTo({
-        top: Math.max(0, target),
-        behavior: "smooth"
-    });
-
-    scheduleActiveTurnUpdate();
-}
-
-function maybeStickToBottom() {
-    const gap = outputDiv.scrollHeight - outputDiv.scrollTop - outputDiv.clientHeight;
-    stickToBottom = gap < 60;
-}
-
-turnScrollRoot.addEventListener("scroll", scheduleActiveTurnUpdate, { passive: true });
+    if (userTurnsChanged) buildTurnMap();
+    else scheduleActiveTurnUpdate();
+});
+turnMessageObserver.observe(outputDiv, { childList: true });
 
 outputDiv.addEventListener("scroll", () => {
-    maybeStickToBottom();
+    if (turnJump && Math.abs(outputDiv.scrollTop - turnJump.top) > 1) turnJump = null;
+    if (!turnJump) {
+        const gap = outputDiv.scrollHeight - outputDiv.scrollTop - outputDiv.clientHeight;
+        stickToBottom = gap < 60;
+    }
     scheduleActiveTurnUpdate();
 }, { passive: true });
-
-window.addEventListener("resize", () => {
-    const nextRoot = document.querySelector(".content") || outputDiv;
-
-    if (nextRoot !== turnScrollRoot) {
-        turnScrollRoot = nextRoot;
-        refreshTurnMapNow();
-    }
-
-    scheduleActiveTurnUpdate();
-});
-
-function initTurnMap() {
-    injectTurnMapStyles();
-
-    if (!ensureTurnMapMarkup()) {
-        console.error("Turn map: .content container not found");
-        return;
-    }
-
-    buildTurnMap();
-
-    if (turnMapMO) turnMapMO.disconnect();
-
-    turnMapMO = new MutationObserver(mutations => {
-        let turnsChanged = false;
-
-        for (const mutation of mutations) {
-            if (mutation.target !== outputDiv || mutation.type !== "childList") continue;
-
-            const relevant = [...mutation.addedNodes, ...mutation.removedNodes].some(node =>
-                node instanceof HTMLElement && node.classList.contains("msg") && node.classList.contains("user")
-            );
-
-            if (relevant) {
-                turnsChanged = true;
-                break;
-            }
-        }
-
-        if (turnsChanged) refreshTurnMap();
-    });
-
-    turnMapMO.observe(outputDiv, { childList: true });
-    refreshTurnMap();
-}
-
-if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initTurnMap);
-} else {
-    initTurnMap();
-}
 
 /* ---------------------------------------------------------------- save btn */
 
