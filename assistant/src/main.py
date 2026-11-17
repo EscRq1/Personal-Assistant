@@ -450,6 +450,7 @@ class Main:
                 async for token in self.llm.ask(
                     prompt=prompt,
                     purpose="short-term memory compaction",
+                    thinking = False,
                     model="Observer",
                     max_tokens=4096,
                     ctx=ctx,
@@ -687,6 +688,7 @@ class Main:
         prompt,
         purpose,
         model="Observer",
+        thinking = True,
         max_tokens=None,
     ):
         """
@@ -703,6 +705,7 @@ class Main:
                 purpose=purpose,
                 model=model,
                 max_tokens=max_tokens,
+                thinking = thinking,
                 ctx=ctx,
             ):
                 if ctx.cancel_event.is_set():
@@ -747,6 +750,7 @@ class Main:
             summary_prompt,
             purpose="chat summary",
             model="Observer",
+            thinking = False
         )
 
 
