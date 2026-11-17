@@ -1378,12 +1378,14 @@ class Controller:
         self,
         prompt: str,
         purpose: str,
+        thinking: bool = True,
         web_enabled: bool = False,
         system_prompt=None,
         images_b64=None,
         model=None,
         max_tokens=None,
         ctx=None,
+
     ):
         if ctx is None:
             raise ValueError("ExecutionContext is required")
@@ -1425,6 +1427,7 @@ class Controller:
                 result = await self.callObserver(
                     prompt=prompt,
                     ctx=ctx,
+                    thinking = thinking,
                     system_prompt=system_prompt,
                     images_b64=images_b64,
                     max_tokens=max_tokens,
