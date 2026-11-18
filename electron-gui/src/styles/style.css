@@ -1159,3 +1159,18 @@ input:checked + .slider:before {
 *::-webkit-scrollbar { width: 8px; height: 8px; }
 *::-webkit-scrollbar-thumb { background: #4a4e51; border-radius: 10px; }
 *::-webkit-scrollbar-track { background: transparent; }
+
+/* Prompt additions during the active turn. */
+.update-btn {
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 7px 12px;
+    background: var(--bg-elev-2);
+    color: var(--text-1);
+    font: inherit;
+    cursor: pointer;
+}
+.update-btn:disabled { opacity: .5; cursor: default; }
+.update-btn[hidden], .update-status[hidden] { display: none; }
+.update-status { margin: 4px 0; color: var(--text-2); font-size: 12px; }
+.user-appendix { margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }

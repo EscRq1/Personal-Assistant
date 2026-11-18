@@ -25,6 +25,69 @@ const budgetSelectorAssistant = document.getElementById("hm-assist-2");
 const budgetSelectorCoder = document.getElementById("hm-coder-2");
 const toolBudgetSelector = document.getElementById("hm-tools");
 
+const updateBtn = document.getElementById("update-btn");
+const updateStatus = document.getElementById("update-status");
+let activeRequestId = null;
+let updatesLocked = false;
+let appendChain = Promise.resolve();
+const updateReceipts = new Set();
+
+function refreshUpdateUI() {
+    updateBtn.hidden = !isGenerating || updatesLocked;
+    updateBtn.disabled = !activeRequestId || !ain.value.trim() || isStopping;
+}
+
+async function submitAppendix() {
+    if (!isGenerating || updatesLocked || !activeRequestId || isStopping) return;
+    const text = ain.value.trim();
+    if (!text) return;
+    const requestId = activeRequestId;
+    const generationId = currentGenerationId;
+    const updateId = crypto.randomUUID();
+    ain.value = "";
+    resizeInput();
+    refreshUpdateUI();
+    const notice = document.createElement("div");
+    notice.className = "user-appendix";
+    notice.textContent = "Update pending · " + text;
+    activeUserText?.appendChild(notice);
+
+    appendChain = appendChain.catch(() => {}).then(async () => {
+        if (generationId !== currentGenerationId || !isGenerating) {
+            notice.textContent = "Update was not sent · " + text;
+            if (!ain.value) { ain.value = text; resizeInput(); }
+            return;
+        }
+        try {
+            const response = await fetch(API + "/append", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify({request_id: requestId, update_id: updateId, text})
+            });
+            const result = await response.json();
+            if (!response.ok) throw new Error(result.error || "Update rejected");
+            notice.textContent = (updateReceipts.has(updateId) ? "Update applied · " : "Update accepted · ") + text;
+            if (generationId === currentGenerationId) {
+                updateStatus.hidden = false;
+                updateStatus.textContent = "Update accepted. Preparing continuation…";
+            }
+        } catch (error) {
+            notice.textContent = "Update failed · " + text;
+            if (generationId === currentGenerationId) {
+                // Preserve the exact addition for retry, including existing draft text.
+                ain.value = text + (ain.value ? "\n" + ain.value : "");
+                resizeInput();
+                updateStatus.hidden = false;
+                updateStatus.textContent = error.message + " The addition is back in the input.";
+            }
+        }
+        refreshUpdateUI();
+    });
+}
+let activeUserText = null;
+updateBtn.addEventListener("click", submitAppendix);
+ain.addEventListener("input", refreshUpdateUI);
+
 /* ------------------------------------------------------------------- state */
 
 let currentAbortController = null;
@@ -635,6 +698,17 @@ function clearInputUI() {
 
 function setGenerationUI(active) {
     isGenerating = active;
+    if (active) {
+        activeRequestId = null;
+        updatesLocked = false;
+        updateReceipts.clear();
+        updateStatus.hidden = true;
+    } else {
+        activeRequestId = null;
+        activeUserText = null;
+        updateStatus.hidden = true;
+    }
+    refreshUpdateUI();
 
     if (active) {
         controlImg.src = "../../assets/square-solid-full.svg";
@@ -739,7 +813,7 @@ function splitOversizedInput(text) {
 async function sendMessage() {
     if (isBusy()) return;
 
-    const query = ain.value.trim();
+    let query = ain.value.trim();
     if (!query && !pendingAttachments.length) return;
 
     const generationFiles = [...pendingAttachments];
@@ -762,6 +836,7 @@ async function sendMessage() {
 
     setGenerationUI(true);
     const userText = appendLiveUserTurn(outputDiv, query, generationFiles);
+    activeUserText = userText;
     clearInputUI();
 
     const loadingId = `loading-${Date.now()}-${generationId}`;
@@ -857,6 +932,22 @@ async function sendMessage() {
 
             try {
                 const packet = JSON.parse(data);
+
+                const update = packet.request_update;
+                if (update) {
+                    if (update.status === "ready") activeRequestId = update.request_id;
+                    if (update.status === "locked") {
+                        updatesLocked = true;
+                        updateStatus.hidden = false;
+                        updateStatus.textContent = "Specialist work is running. Stop is available.";
+                    }
+                    if (update.status === "applied") {
+                        for (const id of update.ids || []) updateReceipts.add(id);
+                        updateStatus.hidden = false;
+                        updateStatus.textContent = "Continuing with your updates.";
+                    }
+                    refreshUpdateUI();
+                }
 
                 const stage = packet.backend_stage;
 
@@ -1471,7 +1562,9 @@ document.head.appendChild(attachmentStyle);
 ain.addEventListener("keydown", event => {
     if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
-        if (!isBusy()) send();
+        if (isGenerating) {
+            void submitAppendix();
+        } else if (!isBusy()) send();
     }
 });
 

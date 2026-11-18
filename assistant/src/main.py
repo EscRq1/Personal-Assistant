@@ -1232,7 +1232,7 @@ class Main:
                     break
                 #Yield the reasoning token but skip all the memory related logic after 
                 #to prevent saving reasoning into the memory
-                if isinstance(token, dict) and "reasoning" in token:
+                if isinstance(token, dict):
                     # Discardable reasoning: forwarded to the frontend
                     # only. Excluded from full_response, so it never
                     # reaches short-term, long-term, or RAG memory.
@@ -1267,9 +1267,10 @@ class Main:
             else ""
         )
 
+        additions = "".join("\n\n[User update]\n" + update["text"] for update in ctx.applied_updates)
         pending.append({
             "role": "user",
-            "content": combined_tags + user_input,
+            "content": combined_tags + user_input + additions,
         })
 
         pending.append({
@@ -1307,7 +1308,7 @@ class Main:
         # Keep only the clean original user text.
         if user_text_original.strip():
             self.pending_profile_inputs.append(
-                user_text_original
+                user_text_original + additions
             )
 
 
@@ -1445,6 +1446,34 @@ def sse_token(token):
     )
 
 
+@app.post("/append")
+async def append_request(request: Request):
+    try:
+        data = await request.json()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"error": "Expected a JSON object"}, status_code=400)
+    request_id = data.get("request_id")
+    update_id = data.get("update_id")
+    text = data.get("text")
+    if not all(isinstance(v, str) and v.strip() for v in (request_id, update_id, text)):
+        return JSONResponse({"error": "request_id, update_id and text are required"}, status_code=400)
+    with assistant.generation_lock:
+        ctx = assistant.generation_context
+        if ctx is None or ctx.request_id != request_id:
+            return JSONResponse({"error": "This request has already ended."}, status_code=409)
+        with ctx.update_lock:
+            if update_id in ctx.update_ids:
+                return JSONResponse({"status": "accepted", "update_id": update_id})
+            if ctx.cancel_event.is_set() or ctx.updates_closed:
+                return JSONResponse({"error": "Updates are unavailable after delegation or completion. Stop remains available."}, status_code=409)
+            ctx.pending_updates.append({"id": update_id, "text": text})
+            ctx.update_ids.add(update_id)
+            ctx.update_event.set()
+    return JSONResponse({"status": "accepted", "update_id": update_id})
+
+
 @app.post("/stop")
 def stop_generation():
     with assistant.generation_lock:
@@ -1507,6 +1536,7 @@ async def ask(request: Request):
             return JSONResponse({"error": "Memory compaction is in progress. Retry after it finishes."}, status_code=409)
         if assistant.generation_context is not None:
             return JSONResponse({"error": "Another generation or upload is already running."}, status_code=409)
+        ctx.request_id = uuid.uuid4().hex
         ctx.generation_done.clear()
         assistant.generation_context = ctx
 
@@ -1792,6 +1822,7 @@ async def _ask_reserved(request: Request, ctx):
         # immediately after receiving the attachment receipt.
         stream = assistant.process_query(query, search, images=images, ctx=ctx)
         try:
+            yield {"request_update": {"status": "ready", "request_id": ctx.request_id}}
             if imported.files:
                 yield {"sandbox_files": imported.files}
             async for token in stream:
@@ -1802,6 +1833,13 @@ async def _ask_reserved(request: Request, ctx):
     async_generator = generation_with_uploads()
 
     def on_generation_finished(finished_ctx):
+        with finished_ctx.update_lock:
+            finished_ctx.updates_closed = True
+            finished_ctx.pending_updates.clear()
+            finished_ctx.continuation_messages.clear()
+            finished_ctx.applied_updates.clear()
+            finished_ctx.update_ids.clear()
+            finished_ctx.update_event.clear()
         should_start_compaction = False
 
         with assistant.generation_lock:
