@@ -153,6 +153,9 @@ class OrchestratedBatch(WorkerRuntime):
         self._clients, self._clients_lock = clients, clients_lock
         ended, timed_out = threading.Event(), threading.Event()
         deadline = time.monotonic() + self.config.batch_timeout
+        self.deadline = deadline
+        cancel.batch_deadline = deadline
+        cancel.package_reserve_seconds = min(60.0, self.config.batch_timeout / 4)
         status, error = "partial", None
         shared_ready = False
         internal_drain = False
@@ -467,6 +470,8 @@ class OrchestratedBatch(WorkerRuntime):
                 # Consuming an event never acknowledges the review itself.
                 if pending:
                     return [], False
+                if self._budget()["wrap_up_now"]:
+                    return [], True
                 if self.cancel.is_set() or not self._running():
                     return [], False
                 remaining = None if deadline is None else deadline - time.monotonic()
@@ -558,6 +563,13 @@ class OrchestratedBatch(WorkerRuntime):
                                  item["assignment"].iterations, overwrite=True)
             checkpoint(self.workspaces.root / task_id / "result.json", result)
 
+    def _budget(self):
+        remaining = max(0, getattr(self, 'deadline', time.monotonic()) - time.monotonic())
+        reserve = getattr(self.cancel, 'package_reserve_seconds', 0)
+        return {"seconds_remaining": round(remaining, 3), "fallback_reserve_seconds": reserve,
+                "wrap_up_now": remaining <= reserve,
+                "scope": "whole_batch_including_coordinator_and_all_workers"}
+
     def _board(self, detailed=False):
         def report(item):
             result = item.get("result")
@@ -568,7 +580,10 @@ class OrchestratedBatch(WorkerRuntime):
                 "verification_status": result.get("verification_status"),
                 "iterations": result.get("iterations"), "snapshot_complete": result.get("snapshot_complete")}
 
-        return {"workers": {name: {"slot": slot["client"].spec.slot,
+        return {"batch_budget": self._budget(),
+            "waiting_for_approval": [name for name, item in self.tasks.items()
+                if item.get("result") is None and self.progress.snapshot(name).get("phase") == "waiting_for_approval"],
+            "workers": {name: {"slot": slot["client"].spec.slot,
                     "state": "unavailable" if slot.get("unavailable") else (
                         "busy" if slot["task_id"] else "idle"), "task_id": slot["task_id"]}
                 for name, slot in self.slots.items()},
@@ -839,6 +854,15 @@ class OrchestratedBatch(WorkerRuntime):
         limit = self.config.orchestrator.max_iterations
         self.coordinator_messages = [{"role": "system", "content": (
             "You coordinate a resident worker pool and own the integrated /workspace candidate. "
+            "The batch timeout is a hard wall-clock deadline for YOU AND ALL WORKERS. "
+            "Each scheduler board reports batch_budget and waiting_for_approval. The user may be away. "
+            "An approval wait is not stalled inference: continue independent work while it is pending. "
+            "If a dependency can be avoided, inspect the worker, interrupt just that assignment, wait "
+            "for its saved snapshot, then resume from source_task with explicit dependency-free instructions. "
+            "Package waits expire before the final fallback reserve; denied/expired requests must not "
+            "be repeated. Ask workers to use existing packages or standard-library alternatives. "
+            "When wrap_up_now is true, avoid new dependencies and assignments: collect completed work, "
+            "interrupt unfinished work if necessary, preserve snapshots and finish with an honest partial report. "
             "The main assistant is waiting and will judge your final deliverable. Health alerts are "
             "suspicions, not proof of failure: compare task complexity, tool progress, and elapsed time. "
             "A pending supervision review is mandatory: inspect_worker for the task, then "
@@ -898,6 +922,10 @@ class OrchestratedBatch(WorkerRuntime):
             remaining = limit - index
             note = {"round": index + 1, "rounds_allocated": limit, "rounds_remaining": remaining,
                     "scheduler": self._board(), "wake_events": wake_events}
+            note["deadline_policy"] = (
+                "Hard batch deadline: preserve and report partial work before timeout. "
+                "Do not depend on an absent user's approval; prefer package-free fallbacks."
+            )
             if self._board()["needs_review"]:
                 note["instruction"] = "Finished results need review. Inspect/collect them, then reassign idle workers if useful work remains; harvesting alone does not dispatch work."
             if not self.tasks:

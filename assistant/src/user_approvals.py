@@ -36,13 +36,16 @@ class ApprovalBroker:
     def request(self, ctx, kind, details):
         if ctx is None or ctx.cancel_event.is_set():
             return 'cancelled'
+        seconds = min(APPROVAL_SECONDS, getattr(ctx, 'approval_timeout_seconds', APPROVAL_SECONDS))
+        if seconds <= 0:
+            return 'expired'
         request_id = secrets.token_urlsafe(24)
-        pending = Pending(ctx, secrets.token_urlsafe(32), time.monotonic() + APPROVAL_SECONDS)
+        pending = Pending(ctx, secrets.token_urlsafe(32), time.monotonic() + seconds)
         with self.lock:
             self.pending[request_id] = pending
         ctx.stream_queue.put(('token', {'approval_request': {
             'id': request_id, 'token': pending.token, 'kind': kind,
-            'details': details, 'expires_in_seconds': APPROVAL_SECONDS,
+            'details': details, 'expires_in_seconds': seconds,
         }}))
         status = 'expired'
         try:

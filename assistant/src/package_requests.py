@@ -5,6 +5,7 @@ from pathlib import Path
 import signal
 import subprocess
 import sys
+import threading
 import tempfile
 import time
 
@@ -90,7 +91,61 @@ def package_result(result, manager, session, packages, source):
             'environment': '/workspace/.venv', 'source': source}
 
 
+class PackageBudgetCancellation:
+    """Stop only package work early enough to leave batch fallback/report time."""
+    def __init__(self, parent, deadline):
+        self.parent, self.deadline = parent, deadline
+        self.local = threading.Event()
+
+    def set(self):
+        self.local.set()
+
+    def is_set(self):
+        return self.local.is_set() or self.parent.is_set() or time.monotonic() >= self.deadline
+
+    def wait(self, seconds):
+        end = min(time.monotonic() + seconds, self.deadline)
+        while not self.is_set():
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                return False
+            if self.parent.wait(min(remaining, .05)):
+                return True
+        return True
+
+
+class PackageBudgetContext:
+    def __init__(self, ctx, deadline):
+        self.parent_context = ctx
+        self.cancel_event = PackageBudgetCancellation(ctx.cancel_event, deadline)
+        self.approval_timeout_seconds = max(0, deadline - time.monotonic())
+
+    def __getattr__(self, name):
+        return getattr(self.parent_context, name)
+
+
+PACKAGE_FALLBACK = (
+    'Do not repeat an unanswered or declined package request. Continue with the standard library, '
+    'already available packages, or another approach without this dependency. If it is essential, '
+    'save partial work and report the exact blocker to the coordinator. Do not bypass approval.'
+)
+
+
 def request_package(args, ctx, *, manager=None, session=None):
+    if ctx is not None and getattr(ctx, 'batch_deadline', None) is not None:
+        cutoff = ctx.batch_deadline - getattr(ctx, 'package_reserve_seconds', 0)
+        if time.monotonic() >= cutoff and not ctx.cancel_event.is_set():
+            return {'status': 'budget_exhausted', 'message': PACKAGE_FALLBACK}
+        scoped = PackageBudgetContext(ctx, cutoff)
+        result = _request_package(args, scoped, manager=manager, session=session)
+        if not ctx.cancel_event.is_set() and time.monotonic() >= cutoff:
+            return {'status': 'budget_exhausted', 'message': PACKAGE_FALLBACK,
+                    'requested': result.get('requested', [])}
+        return result
+    return _request_package(args, ctx, manager=manager, session=session)
+
+
+def _request_package(args, ctx, *, manager=None, session=None):
     """Backend-only session override keeps delegated installs in their own workspace."""
     if ctx is None or not (ctx.sandbox_context_id or ctx.chat_id):
         return {'error': 'missing_context'}
@@ -120,6 +175,8 @@ def request_package(args, ctx, *, manager=None, session=None):
             return package_result(cached, manager, session, packages, 'approved_cache')
         if ctx.cancel_event.is_set():
             return {'status': 'cancelled', 'requested': packages}
+        if isinstance(ctx, PackageBudgetContext):
+            ctx.approval_timeout_seconds = max(0, ctx.cancel_event.deadline - time.monotonic())
         on_wait = getattr(ctx, 'approval_wait', None)
         try:
             if on_wait:
@@ -133,7 +190,8 @@ def request_package(args, ctx, *, manager=None, session=None):
             if on_wait:
                 on_wait(False)
         if status != 'approved' or ctx.cancel_event.is_set():
-            return {'status': status if not ctx.cancel_event.is_set() else 'cancelled', 'requested': packages}
+            return {'status': status if not ctx.cancel_event.is_set() else 'cancelled',
+                    'requested': packages, 'message': PACKAGE_FALLBACK}
         # Keep the exact session and validated requirements that the user approved.
         return download_and_install(manager, session, packages, ctx)
     except (ValueError, PackageError) as exc:
