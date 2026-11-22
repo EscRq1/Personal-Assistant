@@ -1,4 +1,5 @@
 from typing import Callable, Any
+from .desktop_tools import DESKTOP_TOOL_SCHEMAS
 from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
 
 SUMMARY_PROMPT = {
@@ -12,6 +13,7 @@ SUMMARY_PROMPT = {
 TOOLS = [
     SANDBOX_EXEC_SCHEMA,
     SANDBOX_INSTALL_SCHEMA,
+    *DESKTOP_TOOL_SCHEMAS,
     {
         "type": "function",
         "function": {

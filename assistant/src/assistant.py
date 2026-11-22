@@ -8,6 +8,11 @@ import socket
 from copy import deepcopy
 
 
+from desktop_manager import DesktopManager
+from tools.desktop_tools import (
+    DESKTOP_INSTRUCTIONS, DESKTOP_NAMES,
+    prepare_desktop_results, append_tool_results, desktop_text_context,
+)
 from tools.web_search import web_lookup
 from tools.current_chat_search import (
     search_current_chat,
@@ -142,6 +147,11 @@ class Controller:
         
 
         register_control_tool("call_coder")
+
+        self.desktop = DesktopManager()
+        if self.desktop.enabled:
+            register_tool("desktop_observe", self.desktop_observe)
+            register_tool("desktop_act", self.desktop_act)
 
         self.tool_controller = ToolController(self)
 
@@ -517,6 +527,9 @@ class Controller:
             "Avoid repeating text already shown."
         )})
 
+        if self.desktop.enabled:
+            messages.append({"role": "system", "content": DESKTOP_INSTRUCTIONS})
+
         if images_b64:
 
             content = [
@@ -782,13 +795,9 @@ class Controller:
             # Append tool results to the same logical conversation.
 
 
-            for result in results:
-
-                messages.append(
-                    self.tool_controller.build_tool_message(
-                        result
-                    )
-                )
+            append_tool_results(
+                messages, results, self.tool_controller.build_tool_message,
+            )
 
             print(
                 f"{Fore.CYAN}"
@@ -924,7 +933,7 @@ class Controller:
 
         # Create an independent conversation for this reasoning tier.
 
-        parent_messages = list(messages)
+        parent_messages = desktop_text_context(messages)
 
         # Collect the inherited instructions at the beginning.
         system_parts = []
@@ -1283,13 +1292,9 @@ class Controller:
             if results is None or ctx.cancel_event.is_set():
                 return
 
-            for result in results:
-
-                messages.append(
-                    self.tool_controller.build_tool_message(
-                        result
-                    )
-                )
+            append_tool_results(
+                messages, results, self.tool_controller.build_tool_message,
+            )
 
             print(
                 f"{Fore.CYAN}"
@@ -1842,6 +1847,14 @@ class Controller:
             ensure_ascii=False,
         )   
 
+    def desktop_observe(self):
+        return self.desktop.call("observe", _execution_context.get())
+
+    def desktop_act(self, frame_id, action):
+        return self.desktop.call("act", _execution_context.get(), {
+            "frame_id": frame_id, "action": action,
+        })
+
     def sandbox_install(self, **args):
         """Called through the existing cancellable tool worker, never the event loop."""
         return install_sandbox_packages(args, _execution_context.get())
@@ -2022,7 +2035,7 @@ class ToolController:
                 "function": {**function, "arguments": json.dumps(arguments)},
             })
 
-        return execute_tool_calls(execution_calls)
+        return prepare_desktop_results(execute_tool_calls(execution_calls))
 
     # ========================================================
     # BUILD ASSISTANT TOOL-CALL MESSAGE
@@ -2356,7 +2369,7 @@ class ToolController:
         return [
             tool
             for tool in tools
-            if tool["function"]["name"] not in blocked
+            if tool["function"]["name"] not in blocked | DESKTOP_NAMES
         ]
 
 

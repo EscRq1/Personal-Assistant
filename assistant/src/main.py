@@ -58,26 +58,21 @@ from sandbox.package_cache import PackageError
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    manager = get_sandbox_manager()
-
-    removed = await asyncio.to_thread(
-        manager.reconcile
-    )
-
-    if removed:
-        print(
-            f"{Fore.YELLOW}[Sandbox] Reconciled "
-            f"{len(removed)} stale execution container(s)."
-        )
-
+    await asyncio.to_thread(assistant.llm.desktop.start)
     try:
-        yield
+        manager = get_sandbox_manager()
+        removed = await asyncio.to_thread(manager.reconcile)
+        if removed:
+            print(f"{Fore.YELLOW}[Sandbox] Reconciled {len(removed)} stale execution container(s).")
+        try:
+            yield
+        finally:
+            from agent_runtime import shutdown_delegations
+            drained = await asyncio.to_thread(shutdown_delegations, 30)
+            if not drained:
+                print("[AGENTS] Shutdown cancelled workers; sandbox cleanup is still draining.")
     finally:
-        from agent_runtime import shutdown_delegations
-        drained = await asyncio.to_thread(shutdown_delegations, 30)
-        if not drained:
-            print("[AGENTS] Shutdown cancelled workers; sandbox cleanup is still draining.")
+        await asyncio.to_thread(assistant.llm.desktop.close)
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(AskBodyLimitMiddleware)
@@ -2524,6 +2519,8 @@ async def shutdown_session(
         f"{Fore.CYAN}"
         "[Saving memories and shutting down. Goodbye!]"
     )
+
+    await asyncio.to_thread(assistant.llm.desktop.close)
 
     await asyncio.to_thread(
         assistant.llm.router.terminate
