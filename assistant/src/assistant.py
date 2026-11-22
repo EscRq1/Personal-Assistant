@@ -9,6 +9,8 @@ from copy import deepcopy
 
 
 from desktop_manager import DesktopManager
+from user_approvals import ask_desktop_access, filter_desktop_tools
+from package_requests import request_package
 from tools.desktop_tools import (
     DESKTOP_INSTRUCTIONS, DESKTOP_NAMES,
     prepare_desktop_results, append_tool_results, desktop_text_context,
@@ -144,12 +146,14 @@ class Controller:
 
         register_tool("sandbox_exec", self.sandbox_exec)
         register_tool("sandbox_install", self.sandbox_install)
+        register_tool("request_package", self.request_package)
         
 
         register_control_tool("call_coder")
 
         self.desktop = DesktopManager()
         if self.desktop.enabled:
+            register_tool("ask_desktop_access", self.ask_desktop_access)
             register_tool("desktop_observe", self.desktop_observe)
             register_tool("desktop_act", self.desktop_act)
 
@@ -1847,6 +1851,12 @@ class Controller:
             ensure_ascii=False,
         )   
 
+    def ask_desktop_access(self, reason):
+        return ask_desktop_access(_execution_context.get(), reason)
+
+    def request_package(self, **args):
+        return request_package(args, _execution_context.get())
+
     def desktop_observe(self):
         return self.desktop.call("observe", _execution_context.get())
 
@@ -2294,11 +2304,12 @@ class ToolController:
         self,
         web_enabled: bool = True,
     ) -> list[dict]:
-        return [
+        return filter_desktop_tools([
             configured_delegate_schema() if tool.get("function", {}).get("name") == "delegate_to_subagents" else tool
             for tool in self.tools
-            if web_enabled or tool.get("function", {}).get("name") != "web_call"
-        ]
+            if (web_enabled or tool.get("function", {}).get("name") != "web_call")
+            and tool.get("function", {}).get("name") != "sandbox_install"
+        ], _execution_context.get())
 
     @staticmethod
     def print_tool_batch(
@@ -2369,7 +2380,7 @@ class ToolController:
         return [
             tool
             for tool in tools
-            if tool["function"]["name"] not in blocked | DESKTOP_NAMES
+            if tool["function"]["name"] not in blocked | DESKTOP_NAMES | {"ask_desktop_access"}
         ]
 
 
@@ -2390,6 +2401,7 @@ class ExecutionContext:
         self.updates_closed = False
         self.continuation_messages = []
         self.cancel_event = threading.Event()
+        self.desktop_access = False
 
         # True while a physical llama-router inference request is active.
         self.llm_active = threading.Event()

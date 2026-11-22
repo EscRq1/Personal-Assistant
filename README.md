@@ -57,3 +57,9 @@ export SANDBOX_WHEEL_CACHE = <PATH>    #Setup path to sandbox package wheels dir
 export ASSISTANT_AGENT_CONFIG = <PATH>    #Setup path to agents.json
 export ASSISTANT_SANDBOX_DIR = <PATH>   #Setup path to main sandbox directory
 ```
+
+## User approvals
+
+Desktop access and Python package downloads require an Allow/Decline decision in
+the composer. See [user approvals](docs/user-approvals.md) for scope, architecture,
+setup and validation.

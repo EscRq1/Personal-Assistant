@@ -137,7 +137,7 @@ SANDBOX_EXEC_SCHEMA: dict[str, Any] = {
             "gets a fresh non-root container, so shell variables, /tmp and background processes "
             "do not persist. No network or host file access. Only files imported by the backend "
             "are available. Shell composition is supported; default timeout is 30 seconds. "
-            "Use sandbox_install for approved Python packages; runtime pip is offline. "
+            "Use request_package to request user-approved Python dependencies; runtime pip is offline. "
             "After installation python uses /workspace/.venv; use python -m pytest for tests."
             "LaTeX: Full TeX Live is installed locally."
             "Use: latex-compile --outdir /workspace/output /workspace/document.tex"
@@ -170,9 +170,8 @@ SANDBOX_INSTALL_SCHEMA: dict[str, Any] = {
             "Runs offline in the same isolated sandbox; no internet downloads. Packages must "
             "already be in the operator's approved cache. Names, extras and version constraints "
             "are accepted, for example requests or requests>=2. Use sandbox_exec afterwards. "
-            "If package_not_approved is returned, stop installation and show the user "
-            "the provided session_id and manual_script exactly as returned. Ask the user "
-            "to run that script. Do not attempt another download or network method yourself. "
+            "If package_not_approved is returned, request user approval through request_package "
+            "when available, otherwise report the dependency to the parent assistant. "
             "Reset removes this environment. Default installation timeout is 120 seconds."
             "If you require an OCR, your preinstalled module is TesseractOCR."
             "Install pytesseract package to use it in the sandbox"
@@ -429,55 +428,9 @@ def sandbox_install(
             and session is not None
             and packages is not None
         ):
-            approval_token = (
-                create_manual_package_approval(
-                    session.id,
-                    packages,
-                )
-            )
-
-            script = build_manual_package_script(
-                packages,
-                session.id,
-                approval_token,
-            )
-
             return {
-                "error": "package_not_approved",
-
-                "message": (
-                    "The requested package/version is not "
-                    "in the approved package cache. "
-                    "The user may manually approve it for "
-                    "this sandbox session."
-                ),
-
-                "requested": packages,
-
-                # This is the actual sandbox session ID,
-                # not the chat/context identifier.
-                "session_id": session.id,
-
-                "environment": "/workspace/.venv",
-
-                "manual_script": script,
-
-                "approval_expires_in_seconds": (
-                    MANUAL_APPROVAL_TTL_SECONDS
-                ),
-
-                "assistant_instruction": (
-                    "The requested Python dependency is not "
-                    "in the approved package cache. "
-                    "Tell the user that manual approval is "
-                    "required. Show the session_id and "
-                    "manual_script exactly as provided. "
-                    "Ask the user to run the script on the "
-                    "host and then return to the chat. "
-                    "Do not attempt another package download, "
-                    "do not enable sandbox networking, and do "
-                    "not invent another installation method."
-                ),
+                "error": "package_not_approved", "requested": packages,
+                "message": "User approval is required. Call request_package with these requirements and a reason. If unavailable, report the dependency to the parent assistant. Do not attempt host downloads.",
             }
 
         # Other PackageError values remain ordinary safe

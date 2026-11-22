@@ -58,7 +58,6 @@ from sandbox.package_cache import PackageError
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await asyncio.to_thread(assistant.llm.desktop.start)
     try:
         manager = get_sandbox_manager()
         removed = await asyncio.to_thread(manager.reconcile)
@@ -76,6 +75,31 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.add_middleware(AskBodyLimitMiddleware)
+
+@app.post("/approvals/{approval_id}/decision")
+async def approval_decision(approval_id: str, request: Request):
+    from user_approvals import approvals
+    # Decisions are forwarded by Electron's main process via IPC. Browser
+    # origins (including sandboxed opaque/null origins) cannot approve tools.
+    if request.headers.get("origin") is not None or request.headers.get("sec-fetch-site") is not None:
+        return JSONResponse({"error": "untrusted_origin"}, status_code=403)
+    if request.client is not None and request.client.host not in {"127.0.0.1", "::1"}:
+        return JSONResponse({"error": "local_only"}, status_code=403)
+    raw = bytearray()
+    async for chunk in request.stream():
+        raw.extend(chunk)
+        if len(raw) > 2048:
+            return JSONResponse({"error": "invalid_decision"}, status_code=413)
+    try:
+        body = json.loads(raw)
+        if not isinstance(body, dict) or set(body) != {"token", "allow"}:
+            raise ValueError()
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "invalid_decision"}, status_code=400)
+    if not approvals.decide(approval_id, body["token"], body["allow"]):
+        return JSONResponse({"error": "approval_expired_or_resolved"}, status_code=409)
+    return {"ok": True}
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -1828,6 +1852,7 @@ async def _ask_reserved(request: Request, ctx):
     async_generator = generation_with_uploads()
 
     def on_generation_finished(finished_ctx):
+        finished_ctx.desktop_access = False
         with finished_ctx.update_lock:
             finished_ctx.updates_closed = True
             finished_ctx.pending_updates.clear()

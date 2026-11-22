@@ -732,6 +732,7 @@ function setGenerationUI(active) {
 function finishGeneration(generationId) {
     if (generationId !== currentGenerationId) return false;
 
+    clearApprovalCards();
     flushAssistantRender();
     currentAbortController = null;
     setGenerationUI(false);
@@ -933,6 +934,8 @@ async function sendMessage() {
             try {
                 const packet = JSON.parse(data);
 
+                if (packet.approval_request) showApprovalCard(packet.approval_request, generationId);
+                if (packet.approval_resolved) removeApprovalCard(packet.approval_resolved.id);
                 const update = packet.request_update;
                 if (update) {
                     if (update.status === "ready") activeRequestId = update.request_id;
@@ -1105,6 +1108,7 @@ async function sendMessage() {
         console.error(err);
     } finally {
         if (generationId === currentGenerationId) {
+            clearApprovalCards();
             currentAbortController = null;
             setGenerationUI(false);
         }
@@ -1375,6 +1379,7 @@ async function stopAnswering() {
         return;
     }
 
+    clearApprovalCards();
     isStopping = true;
     stoppedGenerationId = currentGenerationId;
     ++currentGenerationId;
@@ -1793,3 +1798,74 @@ saveBtn.addEventListener("click", async () => {
         // toast: "Save failed"
     }
 });
+
+
+// Capabilities stay in UI memory, never in chat text or model tool results.
+const approvalCards = new Map();
+function removeApprovalCard(id) {
+    const entry = approvalCards.get(id);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    entry.card.remove();
+    approvalCards.delete(id);
+    document.getElementById("approval-cards").hidden = approvalCards.size === 0;
+}
+function clearApprovalCards() {
+    for (const id of [...approvalCards.keys()]) removeApprovalCard(id);
+}
+function showApprovalCard(request, generationId) {
+    if (!request || approvalCards.has(request.id) || generationId !== currentGenerationId) return;
+    const host = document.getElementById("approval-cards");
+    const details = request.details || {};
+    const desktop = request.kind === "desktop";
+    const card = document.createElement("section");
+    card.className = "approval-card";
+    card.setAttribute("role", "group");
+    const title = document.createElement("h3");
+    title.textContent = desktop ? "Allow desktop access?" : "Install Python packages?";
+    card.append(title);
+    const text = document.createElement("p");
+    text.textContent = desktop
+        ? "Allow the assistant to view your screen and control your mouse and keyboard for this turn."
+        : `${(details.packages || []).join(", ")}\nDownload these packages and their dependencies from PyPI into this sandbox session only.`;
+    const reason = document.createElement("p");
+    reason.textContent = details.reason || "";
+    card.append(text, reason);
+    if (!desktop && details.actor) {
+        const scope = document.createElement("p");
+        scope.textContent = `Requested by: ${details.actor} · Sandbox: ${details.session_id || "current"}`;
+        card.append(scope);
+    }
+    const status = document.createElement("p");
+    status.setAttribute("role", "status");
+    const actions = document.createElement("div");
+    actions.className = "approval-actions";
+    for (const allow of [false, true]) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = allow ? "Allow" : "Decline";
+        button.addEventListener("click", async () => {
+            if (generationId !== currentGenerationId || !approvalCards.has(request.id)) return;
+            const buttons = [...actions.querySelectorAll("button")];
+            buttons.forEach(b => b.disabled = true);
+            status.textContent = "Submitting your decision…";
+            try {
+                const response = await window.electronAPI.approvalDecision(request.id, request.token, allow);
+                if (response.ok || response.status === 409) removeApprovalCard(request.id);
+                else throw new Error(`Decision failed (${response.status})`);
+            } catch (error) {
+                if (approvalCards.has(request.id)) {
+                    status.textContent = "Could not submit. Please try again.";
+                    buttons.forEach(b => b.disabled = false);
+                }
+            }
+        });
+        actions.append(button);
+    }
+    card.append(status, actions);
+    host.append(card);
+    host.hidden = false;
+    const timer = setTimeout(() => removeApprovalCard(request.id),
+        Math.max(1, Math.min(request.expires_in_seconds || 300, 300)) * 1000);
+    approvalCards.set(request.id, {card, timer});
+}

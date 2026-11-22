@@ -3,7 +3,8 @@ import json
 DESKTOP_NAMES = {"desktop_observe", "desktop_act"}
 IMAGE_PREFIX = "Desktop observation frame "
 DESKTOP_INSTRUCTIONS = (
-    "Desktop tools operate the configured X11 desktop. Call desktop_observe before acting. "
+    "Desktop tools operate the configured X11 desktop. First call ask_desktop_access and wait for approval. "
+    "Access lasts only for this turn. A denial means no desktop use. After approval call desktop_observe before acting. "
     "Use the frame_id and original pixel coordinates from the latest desktop image. "
     "Call one desktop tool per generation. Each action returns a new image. "
     "Inspect the image after each action and observe again after failures or user updates. "

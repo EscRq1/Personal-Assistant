@@ -415,11 +415,11 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(called[0][1], ctx)
         finally:
             context.reset(token)
-        registry_spec = importlib.util.spec_from_file_location('test_registry', ROOT/'tools/tool_registry.py')
+        registry_spec = importlib.util.spec_from_file_location('tools.test_registry', ROOT/'tools/tool_registry.py')
         registry = importlib.util.module_from_spec(registry_spec)
         registry_spec.loader.exec_module(registry)
         registry.register_tool('sandbox_exec', obj.sandbox_exec)
-        self.assertIn(SANDBOX_EXEC_SCHEMA, registry.get_registered_tools())
+        self.assertIn('sandbox_exec', [tool['function']['name'] for tool in registry.get_registered_tools()])
         source = (ROOT/'assistant.py').read_text()
         self.assertIn('register_tool("sandbox_exec", self.sandbox_exec)', source)
         self.assertNotIn('sandbox_create', source)

@@ -1,5 +1,8 @@
+from copy import deepcopy
 from typing import Callable, Any
 from .desktop_tools import DESKTOP_TOOL_SCHEMAS
+from user_approvals import ASK_DESKTOP_SCHEMA
+from package_requests import REQUEST_PACKAGE_SCHEMA
 from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
 
 SUMMARY_PROMPT = {
@@ -13,6 +16,8 @@ SUMMARY_PROMPT = {
 TOOLS = [
     SANDBOX_EXEC_SCHEMA,
     SANDBOX_INSTALL_SCHEMA,
+    ASK_DESKTOP_SCHEMA,
+    REQUEST_PACKAGE_SCHEMA,
     *DESKTOP_TOOL_SCHEMAS,
     {
         "type": "function",
@@ -361,6 +366,8 @@ TOOLS = [
         }
     },
 ]
+
+TOOLS = deepcopy(TOOLS)
 
 for tool in TOOLS:
     parameters = tool["function"]["parameters"]

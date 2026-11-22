@@ -1174,3 +1174,26 @@ input:checked + .slider:before {
 .update-btn[hidden], .update-status[hidden] { display: none; }
 .update-status { margin: 4px 0; color: var(--text-2); font-size: 12px; }
 .user-appendix { margin-top: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* User decisions float 8px above the composer, without moving the textarea. */
+.input-cont { position: relative; }
+.approval-cards {
+    position: absolute; bottom: calc(100% + 8px); left: 0; right: 0;
+    display: flex; flex-direction: column; gap: 8px; max-height: 45vh;
+    overflow-y: auto; z-index: 100;
+}
+.approval-cards[hidden] { display: none; }
+.approval-card {
+    padding: 14px 16px; border: 1px solid var(--border); border-radius: 14px;
+    background: var(--bg-elev); color: var(--text-1); box-shadow: 0 6px 24px #0005;
+    overflow-wrap: anywhere;
+}
+.approval-card h3 { margin: 0 0 8px; font-size: 14px; }
+.approval-card p { margin: 6px 0; font-size: 13px; white-space: pre-wrap; }
+.approval-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.approval-actions button {
+    padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg-main); color: var(--text-1); cursor: pointer;
+}
+.approval-actions button:last-child { background: #3268a8; color: white; }
+.approval-actions button:disabled { opacity: .55; cursor: wait; }

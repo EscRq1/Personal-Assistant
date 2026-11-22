@@ -661,6 +661,8 @@ marked.setOptions({
 
 contextBridge.exposeInMainWorld('electronAPI', {
 
+    approvalDecision: (id, token, allow) => ipcRenderer.invoke('approval-decision', {id, token, allow}),
+
     parseMarkdown: (text) => {
         return parseMarkdown(text);
     }

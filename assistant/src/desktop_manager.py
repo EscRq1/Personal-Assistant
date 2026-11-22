@@ -12,6 +12,7 @@ import threading
 import time
 
 from desktop_control.protocol import receive_message, send_message
+from user_approvals import has_desktop_access
 
 log = logging.getLogger(__name__)
 PROJECT_DIR = Path(__file__).resolve().parent
@@ -117,6 +118,8 @@ class DesktopManager:
             return {'error': 'Desktop control is disabled in desktop_config.json.'}
         if ctx is None:
             return {'error': 'Desktop tools require an active request context.'}
+        if not has_desktop_access(ctx):
+            return {'error': 'desktop_access_required', 'message': 'Ask for desktop access first.'}
         while not self.lock.acquire(timeout=0.05):
             if ctx.cancel_event.is_set() or self.closing.is_set():
                 return {'error': 'Request cancelled.'}
@@ -135,6 +138,8 @@ class DesktopManager:
         try:
             if ctx.cancel_event.is_set() or self.closing.is_set():
                 return {'error': 'Request cancelled.'}
+            if not has_desktop_access(ctx):
+                return {'error': 'desktop_access_required'}
             if not self.start():
                 return {'error': self.last_error or 'Desktop control is unavailable.'}
             self._send({'command': command, 'body': body})
