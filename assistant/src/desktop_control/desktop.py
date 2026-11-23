@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from threading import Event, Lock
 from uuid import uuid4
 
-from .models import ActRequest, Observation
+from .models import ActRequest, Observation, ObserveRequest
 
 
 class DesktopError(Exception):
@@ -20,6 +20,7 @@ class X11Backend:
         import mss
         import pyautogui
         from PIL import Image
+        from Xlib.display import Display
 
         self.mss = mss
         self.image = Image
@@ -27,9 +28,17 @@ class X11Backend:
         self.input.PAUSE = 0
         self.input.FAILSAFE = True
         # One X screen is used for both capture and input.
-        self.width, self.height = self.input.size()
+        self.display = Display()
+        self.width, self.height = self.screen_size()
+
+    def screen_size(self):
+        # Query current root geometry: PyAutoGUI's X11 screen dimensions can
+        # be cached, and coordinate mappings must match the captured screen.
+        geometry = self.display.screen().root.get_geometry()
+        return geometry.width, geometry.height
 
     def capture(self):
+        self.width, self.height = self.screen_size()
         # MSS handles belong to their calling thread.
         with self.mss.mss() as capture:
             shot = capture.grab({"left": 0, "top": 0, "width": self.width, "height": self.height})
@@ -82,22 +91,62 @@ class Desktop:
         self.frame = None
         self.frame_time = 0.0
 
-    def _observe(self):
-        png, width, height = self.backend.capture()
+    def _require_frame(self, frame_id):
+        if self.frame is None or frame_id != self.frame.frame_id:
+            raise DesktopError(409, "Frame consumed or replaced. Observe again.")
+        if time.monotonic() - self.frame_time > self.frame_ttl:
+            raise DesktopError(409, "Frame expired. Observe again.")
+        return self.frame
+
+    def _check_geometry(self, reference, width, height):
+        if (width, height) != (reference.screen_width, reference.screen_height):
+            self.frame = None
+            raise DesktopError(409, "Screen dimensions changed. Request a full-screen observation.")
+
+    def _observe(self, region=None, reference=None):
+        png, screen_width, screen_height = self.backend.capture()
+        origin_x = origin_y = 0
+        width, height = screen_width, screen_height
+        if region is not None:
+            self._check_geometry(reference, screen_width, screen_height)
+            origin_x = reference.origin_x + region.x
+            origin_y = reference.origin_y + region.y
+            width, height = region.width, region.height
+            # Crop native pixels on CPU. Never upscale, resize or encode the
+            # full-screen image for the model when it requested a region.
+            from PIL import Image
+            with Image.open(io.BytesIO(png)) as image:
+                if image.size != (screen_width, screen_height):
+                    raise DesktopError(503, "Capture dimensions do not match the image.")
+                crop = image.crop((origin_x, origin_y, origin_x + width, origin_y + height))
+                output = io.BytesIO()
+                crop.save(output, format="PNG")
+                png = output.getvalue()
         observation = Observation(
             frame_id=uuid4().hex,
             captured_at=datetime.now(timezone.utc).isoformat(),
-            width=width,
-            height=height,
+            width=width, height=height,
+            origin_x=origin_x, origin_y=origin_y,
+            screen_width=screen_width, screen_height=screen_height,
+            view="region" if region is not None else "full",
             image_data_url="data:image/png;base64," + base64.b64encode(png).decode("ascii"),
         )
         self.frame = observation
         self.frame_time = time.monotonic()
         return observation
 
-    def observe(self):
+    def observe(self, request=None):
+        request = request or ObserveRequest()
+        if isinstance(request, dict):
+            request = ObserveRequest.model_validate(request)
         with self.lock:
-            return self._observe()
+            reference = None
+            if request.region is not None:
+                reference = self._require_frame(request.frame_id)
+                region = request.region
+                if region.x + region.width > reference.width or region.y + region.height > reference.height:
+                    raise DesktopError(422, "Region must lie inside the referenced image.")
+            return self._observe(request.region, reference)
 
     def stop(self):
         # Independent of the input lock so an active hold/drag can be interrupted.
@@ -121,10 +170,9 @@ class Desktop:
     def act(self, request: ActRequest):
         with self.lock:
             self._check_stop()
-            if self.frame is None or request.frame_id != self.frame.frame_id:
-                raise DesktopError(409, "Frame consumed or replaced. Observe again.")
-            if time.monotonic() - self.frame_time > self.frame_ttl:
-                raise DesktopError(409, "Frame expired. Observe again.")
+            reference = self._require_frame(request.frame_id)
+            if hasattr(self.backend, "screen_size"):
+                self._check_geometry(reference, *self.backend.screen_size())
             action = request.action
             points = action.path if action.kind == "drag" else []
             if action.kind in ("click", "move"):
@@ -134,6 +182,19 @@ class Desktop:
                     raise DesktopError(422, "Coordinates must lie inside the observed image.")
             if action.kind == "keypress" and not self.backend.valid_keys(action.keys):
                 raise DesktopError(422, "Unknown key. Use PyAutoGUI key names such as ctrl, enter, left.")
+            # Only the backend-held frame determines the origin. All model
+            # coordinates are image-local, including every drag path point.
+            if action.kind in ("click", "move"):
+                action = action.model_copy(update={
+                    "x": reference.origin_x + action.x,
+                    "y": reference.origin_y + action.y,
+                })
+            elif action.kind == "drag":
+                action = action.model_copy(update={"path": [
+                    point.model_copy(update={"x": reference.origin_x + point.x,
+                                             "y": reference.origin_y + point.y})
+                    for point in action.path
+                ]})
             # Invalidate before execution. Failures may have partially changed the desktop.
             self.frame = None
             try:

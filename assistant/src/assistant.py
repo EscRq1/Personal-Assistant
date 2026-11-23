@@ -1857,8 +1857,10 @@ class Controller:
     def request_package(self, **args):
         return request_package(args, _execution_context.get())
 
-    def desktop_observe(self):
-        return self.desktop.call("observe", _execution_context.get())
+    def desktop_observe(self, region=None, frame_id=None):
+        return self.desktop.call("observe", _execution_context.get(), {
+            "region": region, "frame_id": frame_id,
+        })
 
     def desktop_act(self, frame_id, action):
         return self.desktop.call("act", _execution_context.get(), {

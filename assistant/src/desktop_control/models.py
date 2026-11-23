@@ -1,6 +1,6 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class Model(BaseModel):
@@ -10,6 +10,22 @@ class Model(BaseModel):
 class Point(Model):
     x: int = Field(ge=0, strict=True)
     y: int = Field(ge=0, strict=True)
+
+
+class Region(Point):
+    width: int = Field(ge=1, strict=True)
+    height: int = Field(ge=1, strict=True)
+
+
+class ObserveRequest(Model):
+    region: Region | None = None
+    frame_id: str | None = None
+
+    @model_validator(mode="after")
+    def region_needs_frame(self):
+        if (self.region is None) != (self.frame_id is None):
+            raise ValueError("Provide region and frame_id together, or omit both for a full-screen view")
+        return self
 
 
 class Click(Point):
@@ -72,6 +88,12 @@ class Observation(Model):
     width: int
     height: int
     image_data_url: str
+    origin_x: int = 0
+    origin_y: int = 0
+    screen_width: int
+    screen_height: int
+    coordinate_space: Literal["image"] = "image"
+    view: Literal["full", "region"] = "full"
 
 
 class ActResult(Model):

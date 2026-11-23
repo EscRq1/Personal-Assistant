@@ -98,9 +98,9 @@ def serve(connection, desktop):
         if name == 'close':
             return
         try:
-            from .models import ActRequest
+            from .models import ActRequest, ObserveRequest
             if name == 'observe':
-                result = desktop.observe().model_dump()
+                result = desktop.observe(ObserveRequest.model_validate(command.get('body') or {})).model_dump()
             elif name == 'act':
                 result = desktop.act(ActRequest.model_validate(command['body']))
                 result['observation'] = result['observation'].model_dump()
