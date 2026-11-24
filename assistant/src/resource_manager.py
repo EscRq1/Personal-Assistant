@@ -13,7 +13,6 @@ class GPUResource(str, Enum):
     NONE = "none"
     ASSISTANT = "assistant"
     OBSERVER = "observer"
-    CODER = "coder"
     JINA = "jina"
 
 
@@ -22,7 +21,7 @@ class ResourceManager:
     Central owner of GPU-heavy resources.
 
     Invariant:
-        One assistant, observer, coder, reranker,
+        One working model, observer, or reranker
         owns the GPU group at a time.
 
     Shared agents use the assistant router model under shared_agent_batch();
@@ -35,13 +34,11 @@ class ResourceManager:
         router_url: str = "http://127.0.0.1:8080",
         assistant_model: str = "assistant",
         observer_model: str = "observer",
-        coder_model: str = "coder",
         request_timeout: int = 300,
     ):
         self.router_url = router_url.rstrip("/")
         self.assistant_model = assistant_model
         self.observer_model = observer_model
-        self.coder_model = coder_model
         self.request_timeout = request_timeout
 
         self.current_owner = GPUResource.NONE
@@ -221,18 +218,14 @@ class ResourceManager:
 
     def _release_llama_models(self) -> None:
         """
-        Ensure both llama.cpp models are unloaded.
+        Unload any resident llama.cpp model.
 
         This is intentionally based on router state instead of only
         self.current_owner, because the router is the actual source
         of truth.
         """
 
-        for model_name in (
-            self.assistant_model,
-            self.observer_model,
-            self.coder_model,
-        ):
+        for model_name in self._resident_aliases():
             try:
                 if self._is_loaded(model_name):
                     self._unload_llama_model(model_name)
@@ -311,7 +304,8 @@ class ResourceManager:
     def _allocate_assistant(self):
         # If Assistant already exists, simply adopt it.
         if self._is_loaded(self.assistant_model):
-            self.current_owner = GPUResource.ASSISTANT
+            self.current_owner = (GPUResource.OBSERVER if self.assistant_model == self.observer_model
+                                  else GPUResource.ASSISTANT)
             print(
                 f"{Fore.GREEN}"
                 "[RESOURCE MANAGER] assistant already loaded"
@@ -319,11 +313,12 @@ class ResourceManager:
             return
 
         # Router state is authoritative if Python state is stale.
-        if self._is_loaded(self.observer_model) or self._is_loaded(self.coder_model):
+        if self._is_loaded(self.observer_model):
             self._release_llama_models()
 
         self._load_llama_model(self.assistant_model)
-        self.current_owner = GPUResource.ASSISTANT
+        self.current_owner = (GPUResource.OBSERVER if self.assistant_model == self.observer_model
+                                  else GPUResource.ASSISTANT)
 
     def _allocate_observer(self):
         # If Observer already exists, simply adopt it.
@@ -336,31 +331,16 @@ class ResourceManager:
             return
 
         # Router state is authoritative if Python state is stale.
-        if self._is_loaded(self.assistant_model) or self._is_loaded(self.coder_model):
+        if self._is_loaded(self.assistant_model):
             self._release_llama_models()
 
         self._load_llama_model(self.observer_model)
         self.current_owner = GPUResource.OBSERVER
 
-    def _allocate_coder(self):
-        if self._is_loaded(self.coder_model):
-            self.current_owner = GPUResource.CODER
-            print(
-                f"{Fore.GREEN}"
-                "[RESOURCE MANAGER] coder already loaded"
-            )
-            return
-        
-        if self._is_loaded(self.observer_model) or self._is_loaded(self.assistant_model):
-            self._release_llama_models()
-        
-        self._load_llama_model(self.coder_model)
-        self.current_owner = GPUResource.CODER
-
     def _allocate_jina(self):
         # Router is the source of truth.
         # Jina cannot coexist with a loaded llama.cpp model.
-        if any(self._is_loaded(model) for model in [self.assistant_model, self.coder_model, self.observer_model]):
+        if any(self._is_loaded(model) for model in self._resident_aliases()):
             self._release_llama_models()
 
         jina = self._create_jina()
@@ -378,49 +358,23 @@ class ResourceManager:
 
         self.current_owner = GPUResource.NONE
 
-    def reconcile(self):
-        """
-        Synchronize Python-side ownership with the llama.cpp router.
+    def _resident_aliases(self):
+        # Include previous selections: changing the alias must release old weights.
+        return list(dict.fromkeys([self.assistant_model, self.observer_model] +
+                    [item["id"] for item in self._get_models() if item.get("id")]))
 
-        Call once after the router is ready and before serving requests.
-        """
+    def select_model(self, alias):
+        """Call with the inference lock held; selecting does not eagerly load weights."""
         with self.lock:
-            assistant_loaded = self._is_loaded(self.assistant_model)
-            observer_loaded = self._is_loaded(self.observer_model)
-            coder_loaded = self._is_loaded(self.coder_model)
+            self.assistant_model = alias
 
-            loaded_resources = [
-                resource
-                for resource, loaded in (
-                    (GPUResource.ASSISTANT, assistant_loaded),
-                    (GPUResource.OBSERVER, observer_loaded),
-                    (GPUResource.CODER, coder_loaded),
-                )
-                if loaded
-            ]
-
-            if len(loaded_resources) > 1:
-                raise RuntimeError(
-                    "Invalid router state: multiple llama.cpp models are loaded: "
-                    + ", ".join(resource.value for resource in loaded_resources)
-                )
-
-            if assistant_loaded:
-                self.current_owner = GPUResource.ASSISTANT
-            elif observer_loaded:
-                self.current_owner = GPUResource.OBSERVER
-            elif coder_loaded:
-                self.current_owner = GPUResource.CODER
-            elif self._jina is not None:
-                self.current_owner = GPUResource.JINA
-            else:
-                self.current_owner = GPUResource.NONE
-
-            print(
-                f"{Fore.CYAN}"
-                f"[RESOURCE MANAGER] reconciled owner: "
-                f"{self.current_owner.value}"
-            )
+    def reconcile(self):
+        with self.lock:
+            loaded = [alias for alias in self._resident_aliases() if self._is_loaded(alias)]
+            if len(loaded) > 1:
+                raise RuntimeError("Multiple router models are loaded: " + ", ".join(loaded))
+            self.current_owner = (GPUResource.OBSERVER if loaded == [self.observer_model]
+                                  else GPUResource.ASSISTANT if loaded else GPUResource.NONE)
 
     # ============================================================
     # Resource switching
@@ -440,6 +394,12 @@ class ResourceManager:
                 raise RuntimeError("Agent requests failed to drain; restart the backend before loading a model")
             if self._shared_agents_active:
                 raise RuntimeError("Shared agents own the assistant model; wait for their request lease")
+            if (self.current_owner == GPUResource.OBSERVER
+                    and (resource == GPUResource.OBSERVER or
+                         (resource == GPUResource.ASSISTANT and self.assistant_model == self.observer_model))):
+                return
+            if resource == GPUResource.ASSISTANT and self.assistant_model == self.observer_model:
+                resource = GPUResource.OBSERVER
 
             # ------------------------------------------------------------
             # Router is the source of truth.
@@ -449,16 +409,13 @@ class ResourceManager:
 
             if resource == GPUResource.ASSISTANT:
                 if self._is_loaded(self.assistant_model):
-                    self.current_owner = GPUResource.ASSISTANT
+                    self.current_owner = (GPUResource.OBSERVER if self.assistant_model == self.observer_model
+                                  else GPUResource.ASSISTANT)
                     return
 
             elif resource == GPUResource.OBSERVER:
                 if self._is_loaded(self.observer_model):
                     self.current_owner = GPUResource.OBSERVER
-                    return
-            elif resource == GPUResource.CODER:
-                if self._is_loaded(self.coder_model):
-                    self.current_owner = GPUResource.CODER
                     return
             elif resource == GPUResource.JINA:
                 if (
@@ -483,8 +440,6 @@ class ResourceManager:
 
             if resource == GPUResource.OBSERVER:
                 return self._allocate_observer()
-            if resource == GPUResource.CODER:
-                return self._allocate_coder()
 
             if resource == GPUResource.JINA:
                 return self._allocate_jina()
@@ -518,7 +473,7 @@ class ResourceManager:
     def shared_agent_batch(self, alias, required_slots, drain_timeout, cancel):
         """Keep assistant weights resident; HTTP clients bypass this owner lock.
 
-        The batch owner retains the lock, excluding observer/coder/Jina switches.
+        The batch owner retains the lock, excluding observer/Jina switches.
         Agent requests use independent sockets and never acquire the owner lock.
         Main inference resumes only after server-side slots are confirmed idle.
         """
@@ -562,7 +517,8 @@ class ResourceManager:
                         raise
                     finally:
                         self._shared_agents_active = False
-                        self.current_owner = GPUResource.ASSISTANT
+                        self.current_owner = (GPUResource.OBSERVER if self.assistant_model == self.observer_model
+                                  else GPUResource.ASSISTANT)
 
     def _shared_slots(self, http, alias, timeout):
         with http.get(self.router_url + "/slots", params={"model": alias}, timeout=timeout) as response:

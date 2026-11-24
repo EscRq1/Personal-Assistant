@@ -184,7 +184,7 @@ def _request_package(args, ctx, *, manager=None, session=None):
             status = approvals.request(ctx, 'package', {
                 'reason': reason, 'packages': packages, 'session_id': session.id,
                 'scope': 'current_sandbox', 'source': 'PyPI',
-                'actor': getattr(ctx, 'approval_actor', 'Assistant / coder'),
+                'actor': getattr(ctx, 'approval_actor', 'Assistant'),
             })
         finally:
             if on_wait:

@@ -229,7 +229,7 @@ def sandbox_exec(args: dict[str, Any], ctx: ToolContext | None) -> dict[str, Any
         
         timeout = manager.config.timeout(args.get("timeout"))
         session = manager.get_or_create_for_context(ctx.sandbox_context_id or ctx.chat_id, ctx.cancel_event)
-        result = manager.exec(session, command, timeout, ctx.cancel_event, caller="assistant/coder")
+        result = manager.exec(session, command, timeout, ctx.cancel_event, caller="assistant")
         payload = result.to_dict()
 
 
@@ -389,7 +389,7 @@ def sandbox_install(
             packages,
             timeout,
             ctx.cancel_event,
-            caller="assistant/coder:packages",
+            caller="assistant:packages",
         )
 
         payload = result.to_dict()

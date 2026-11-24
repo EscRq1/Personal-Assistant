@@ -12,11 +12,26 @@ def has_desktop_access(ctx):
                 and not ctx.cancel_event.is_set())
 
 
+TOOL_ACCESS = {
+    "web": ({"web_call"}, "ask_web_access"),
+    "memory": ({"memory_call"}, "ask_memory_access"),
+    "desktop": ({"desktop_act", "desktop_observe"}, "ask_desktop_access"),
+}
+
+
+def has_tool_access(ctx, kind):
+    return bool(ctx is not None and getattr(ctx, kind + "_access", False)
+                and not ctx.cancel_event.is_set())
+
+
 def filter_desktop_tools(tools, ctx):
-    allowed = has_desktop_access(ctx)
-    return [tool for tool in tools
-            if (tool['function']['name'] not in {'desktop_act', 'desktop_observe'} or allowed)
-            and (tool['function']['name'] != 'ask_desktop_access' or not allowed)]
+    result = list(tools)
+    for kind, (actual, request) in TOOL_ACCESS.items():
+        allowed = has_tool_access(ctx, kind)
+        result = [tool for tool in result
+                  if (tool['function']['name'] not in actual or allowed)
+                  and (tool['function']['name'] != request or not allowed)]
+    return result
 
 
 @dataclass
@@ -102,3 +117,30 @@ def ask_desktop_access(ctx, reason):
     return {'status': status, 'scope': 'current_turn',
             'message': 'Desktop tools are now available.' if has_desktop_access(ctx)
             else 'Desktop access was not granted. Do not use desktop tools.'}
+
+
+def access_schema(kind):
+    return {"type": "function", "function": {
+        "name": TOOL_ACCESS[kind][1],
+        "description": f"Ask the user to allow {kind} access for this turn. Waits for approval. Do not repeat a denied request unless the user asks.",
+        "parameters": {"type": "object", "properties": {
+            "reason": {"type": "string", "description": "Explain why this capability is needed."}
+        }, "required": ["reason"], "additionalProperties": False},
+    }}
+
+
+ASK_WEB_SCHEMA = access_schema("web")
+ASK_MEMORY_SCHEMA = access_schema("memory")
+
+
+def ask_tool_access(ctx, kind, reason):
+    if kind not in TOOL_ACCESS or not isinstance(reason, str) or not reason.strip() or len(reason) > 1000:
+        return {"error": "invalid_arguments", "message": "Provide a reason of 1–1000 characters."}
+    if has_tool_access(ctx, kind):
+        return {"status": "approved", "scope": "current_turn"}
+    status = approvals.request(ctx, kind, {"reason": reason, "scope": "current_turn"})
+    if status == "approved" and ctx is not None and not ctx.cancel_event.is_set():
+        setattr(ctx, kind + "_access", True)
+    return {"status": status, "scope": "current_turn",
+            "message": f"{kind.title()} tools are now available." if has_tool_access(ctx, kind)
+            else f"{kind.title()} access was not granted. Do not use these tools."}

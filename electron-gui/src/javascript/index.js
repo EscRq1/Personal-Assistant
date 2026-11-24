@@ -13,16 +13,17 @@ const ain = document.getElementById("ai-input");
 const imgBtn = document.getElementById("img-btn");
 const imgInput = document.getElementById("img-input");
 const attachmentTray = document.getElementById("attachment-tray");
-const toggleInput = document.querySelector(".switch input[type='checkbox']");
+const toggleInput = document.getElementById("hm-web");
 const controlBtn = document.getElementById("control-btn");
 const controlImg = document.getElementById("control-img");
 const headerMenuBtn = document.getElementById("header-menu-btn");
 const headerMenu = document.getElementById("header-menu");
 const selectContainers = document.querySelectorAll(".select-container");
 const modeSelectorAssistant = document.getElementById("hm-assist-1");
-const modeSelectorCoder = document.getElementById("hm-coder-1");
+const modelSelector = document.getElementById("hm-model");
+const memoryToggle = document.getElementById("hm-memory");
+const desktopToggle = document.getElementById("hm-desktop");
 const budgetSelectorAssistant = document.getElementById("hm-assist-2");
-const budgetSelectorCoder = document.getElementById("hm-coder-2");
 const toolBudgetSelector = document.getElementById("hm-tools");
 
 const updateBtn = document.getElementById("update-btn");
@@ -883,8 +884,10 @@ async function sendMessage() {
         form.append("websearch", isSearching);
         form.append("m-assist", modeSelectorAssistant.value);
         form.append("b-assist", budgetSelectorAssistant.value);
-        form.append("m-coder", modeSelectorCoder.value);
-        form.append("b-coder", budgetSelectorCoder.value);
+        if (!modelSelector.value) throw new Error("The model list is unavailable. Reopen Run settings to retry.");
+        form.append("model", modelSelector.value);
+        form.append("memory_access", memoryToggle.checked);
+        form.append("desktop_access", desktopToggle.checked);
         form.append("b-tools", toolBudgetSelector.value);
 
         for (const file of generationFiles) {
@@ -1139,7 +1142,6 @@ function createThinkingBubble(parent) {
         ["memory_call",     "../../assets/brain-solid-full.svg"],
         ["search_current_chat",     "../../assets/brain-solid-full.svg"],
         ["get_chat_turn",     "../../assets/file-pen-solid-full.svg"],
-        ["call_coder",      "../../assets/wrench-solid-full.svg"],
         ["sandbox_exec",    "../../assets/gears-solid-full.svg"],
         ["sandbox_install", "../../assets/cubes-solid-full.svg"],
         ["write_notebook",  "../../assets/file-pen-solid-full.svg"],
@@ -1288,8 +1290,7 @@ function createThinkingBubble(parent) {
 
             if ([
                 "thinking",
-                "assistant is thinking",
-                "coder is thinking"
+                "assistant is thinking"
             ].includes(normalized)) {
                 return;
             }
@@ -1800,6 +1801,36 @@ saveBtn.addEventListener("click", async () => {
 });
 
 
+// Refresh at startup and when settings reopen, preserving a valid selection.
+let modelsLoading = false;
+async function loadModels() {
+    if (modelsLoading) return;
+    modelsLoading = true;
+    const status = document.getElementById("model-status");
+    try {
+        const response = await fetch(API + "/models");
+        if (!response.ok) throw new Error("Could not load models");
+        const catalog = await response.json();
+        const previous = modelSelector.value;
+        modelSelector.replaceChildren();
+        for (const model of catalog.models) {
+            const option = document.createElement("option");
+            option.value = model.id;
+            option.textContent = model.name + (model.observer ? " (Observer)" : "");
+            modelSelector.appendChild(option);
+        }
+        modelSelector.value = catalog.models.some(m => m.id === previous) ? previous : catalog.default;
+        modelSelector.disabled = false;
+        status.textContent = "";
+    } catch (error) {
+        status.textContent = "Models unavailable. Reopen settings to retry.";
+    } finally {
+        modelsLoading = false;
+    }
+}
+headerMenuBtn.addEventListener("click", loadModels);
+loadModels();
+
 // Capabilities stay in UI memory, never in chat text or model tool results.
 const approvalCards = new Map();
 function removeApprovalCard(id) {
@@ -1818,20 +1849,24 @@ function showApprovalCard(request, generationId) {
     const host = document.getElementById("approval-cards");
     const details = request.details || {};
     const desktop = request.kind === "desktop";
+    const web = request.kind === "web";
+    const memory = request.kind === "memory";
     const card = document.createElement("section");
     card.className = "approval-card";
     card.setAttribute("role", "group");
     const title = document.createElement("h3");
-    title.textContent = desktop ? "Allow desktop access?" : "Install Python packages?";
+    title.textContent = desktop ? "Allow desktop access?" : web ? "Allow web search?" : memory ? "Allow memory retrieval?" : "Install Python packages?";
     card.append(title);
     const text = document.createElement("p");
-    text.textContent = desktop
+    text.textContent = web ? "Allow web search for this turn only."
+        : memory ? "Allow retrieval from long-term memory for this turn only."
+        : desktop
         ? "Allow the assistant to view your screen and control your mouse and keyboard for this turn."
         : `${(details.packages || []).join(", ")}\nDownload these packages and their dependencies from PyPI into this sandbox session only.`;
     const reason = document.createElement("p");
     reason.textContent = details.reason || "";
     card.append(text, reason);
-    if (!desktop && details.actor) {
+    if (request.kind === "package" && details.actor) {
         const scope = document.createElement("p");
         scope.textContent = `Requested by: ${details.actor} · Sandbox: ${details.session_id || "current"}`;
         card.append(scope);

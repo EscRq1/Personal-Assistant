@@ -150,7 +150,7 @@ DELEGATE_SCHEMA = {
             "worker iteration budgets, reassigns idle slots, reviews results, integrates a separate candidate, "
             "and verifies the deliverable. Model weights remain loaded while you wait. Resume as final judge: "
             "inspect candidate_workspace, verification, reports, and blockers before adopting the candidate. "
-            "Original files are not auto-overwritten. Agents cannot call the coder, browse, or access memory. "
+            "Original files are not auto-overwritten. Agents cannot browse, or access memory. "
             "Call one control tool at a time."
         ),
         "parameters": {

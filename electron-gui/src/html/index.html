@@ -74,47 +74,33 @@
                         <p class="hm-card-desc">Main conversational model. Choose a thinking
                             mode and how much of the response budget reasoning may use.</p>
 
+                        <label class="hm-label" for="hm-model">Model</label>
+                        <div class="hm-field">
+                            <span class="select-container">
+                                <select class="header-menu-select" id="hm-model" aria-label="Working model" disabled>
+                                    <option value="">Loading models…</option>
+                                </select>
+                            </span>
+                        </div>
+                        <p id="model-status" class="hm-card-desc" role="status"></p>
+                        <label class="hm-label" for="hm-assist-1">Thinking mode</label>
                         <div class="hm-field">
                             <span class="select-container" style="--snippet:'Choose thinking mode'">
                                 <select class="header-menu-select" id="hm-assist-1" aria-label="Assistant mode">
                                     <option value="low" selected>Flash</option>
-                                    <option value="medium">Thinking</option>
-                                    <option value="high">Deep</option>
-                                </select>
-                            </span>
-                        </div>
-
-                        <div class="hm-field">
-                            <span class="select-container" style="--snippet:'Set thinking budget'">
-                                <select class="header-menu-select" id="hm-assist-2" aria-label="Assistant thinking budget">
-                                    <option value="1024" selected>1024</option>
-                                    <option value="4096">4096</option>
-                                    <option value="8192">8192</option>
-                                    <option value="-1">Unlimited</option>
-                                </select>
-                            </span>
-                        </div>
-                    </div>
-
-                    <div class="hm-card">
-                        <div class="hm-card-title">Coder</div>
-                        <p class="hm-card-desc">Model used for delegated coding tasks.</p>
-
-                        <div class="hm-field">
-                            <span class="select-container" style="--snippet:'Choose thinking mode'">
-                                <select class="header-menu-select" id="hm-coder-1" aria-label="Coder mode">
-                                    <option value="low">Flash</option>
-                                    <option value="medium" selected>Thinking</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">Thinking</option>
                                     <option value="xhigh">Deep</option>
                                 </select>
                             </span>
                         </div>
 
+                        <label class="hm-label" for="hm-assist-2">Thinking budget</label>
                         <div class="hm-field">
                             <span class="select-container" style="--snippet:'Set thinking budget'">
-                                <select class="header-menu-select" id="hm-coder-2" aria-label="Coder thinking budget">
-                                    <option value="1024">1024</option>
-                                    <option value="4096" selected>4096</option>
+                                <select class="header-menu-select" id="hm-assist-2" aria-label="Assistant thinking budget">
+                                    <option value="1024" selected>1024</option>
+                                    <option value="4096">4096</option>
                                     <option value="8192">8192</option>
                                     <option value="16384">16384</option>
                                     <option value="-1">Unlimited</option>
@@ -125,13 +111,34 @@
 
                     <div class="hm-card">
                         <div class="hm-card-title">Tools</div>
-                        <p class="hm-card-desc">Maximum number of tool calls per turn.</p>
+                        <p class="hm-card-desc">Maximum tool iterations per turn. Off tools can request access for one turn.</p>
 
                         <div class="hm-field">
-                            <span class="select-container" style="--snippet:'Set maximum tool calls'">
+                            <span class="select-container" style="--snippet:'Set maximum tool iterations'">
                                 <input class="header-menu-input" id="hm-tools"
-                                       aria-label="Maximum tool calls allowed" value="8">
+                                       aria-label="Maximum tool iterations" type="number" min="0" step="1" value="8">
                             </span>
+                        </div>
+                        <div class="hm-field">
+                            <label class="switch tool-toggle">
+                                <input type="checkbox" id="hm-web" aria-label="Web search">
+                                <span class="slider round"></span>
+                                <span class="switch-text">Web search</span>
+                            </label>
+                        </div>
+                        <div class="hm-field">
+                            <label class="switch tool-toggle">
+                                <input type="checkbox" id="hm-memory" aria-label="Memory retrieval">
+                                <span class="slider round"></span>
+                                <span class="switch-text">Memory retrieval</span>
+                            </label>
+                        </div>
+                        <div class="hm-field">
+                            <label class="switch tool-toggle">
+                                <input type="checkbox" id="hm-desktop" aria-label="Desktop control">
+                                <span class="slider round"></span>
+                                <span class="switch-text">Desktop control</span>
+                            </label>
                         </div>
                     </div>
                 </div>
@@ -177,11 +184,7 @@
                         </button>
                         <input type="file" id="img-input" accept="image/*" multiple style="display:none" />
 
-                        <label class="switch" title="Web search toggle">
-                            <input type="checkbox">
-                            <span class="slider round"></span>
-                            <span class="switch-text">Web search</span>
-                        </label>
+
 
                         <div class="composer-spacer"></div>
 

@@ -1,14 +1,14 @@
 from copy import deepcopy
 from typing import Callable, Any
 from .desktop_tools import DESKTOP_TOOL_SCHEMAS
-from user_approvals import ASK_DESKTOP_SCHEMA
+from user_approvals import ASK_DESKTOP_SCHEMA, ASK_WEB_SCHEMA, ASK_MEMORY_SCHEMA
 from package_requests import REQUEST_PACKAGE_SCHEMA
 from sandbox_tools import SANDBOX_EXEC_SCHEMA, SANDBOX_INSTALL_SCHEMA
 
 SUMMARY_PROMPT = {
         "summary": {
             "type": "string",
-            "description": "A short, human-readable description of what this specific tool call is about to do. Describe the concrete action and its target, not the generic purpose of the tool. Use a concise present-participle phrase (3–12 words), such as 'Searching the web for NASA satellite datasets', 'Retrieving previous discussion about GPU configuration', 'Executing Python code to analyze CSV data', or 'Delegating database schema debugging to the coder'. Avoid vague descriptions, internal tool names, unnecessary details, and claims that the action has already succeeded."
+            "description": "A short, human-readable description of what this specific tool call is about to do. Describe the concrete action and its target, not the generic purpose of the tool. Use a concise present-participle phrase (3–12 words), such as 'Searching the web for NASA satellite datasets', 'Retrieving previous discussion about GPU configuration', 'Executing Python code to analyze CSV data', or 'Checking database schema constraints'. Avoid vague descriptions, internal tool names, unnecessary details, and claims that the action has already succeeded."
         }
     }
 
@@ -17,6 +17,8 @@ TOOLS = [
     SANDBOX_EXEC_SCHEMA,
     SANDBOX_INSTALL_SCHEMA,
     ASK_DESKTOP_SCHEMA,
+    ASK_WEB_SCHEMA,
+    ASK_MEMORY_SCHEMA,
     REQUEST_PACKAGE_SCHEMA,
     *DESKTOP_TOOL_SCHEMAS,
     {
@@ -235,56 +237,6 @@ TOOLS = [
         }
     },
     {
-        "type": "function",
-        "function": {
-            "name": "call_coder",
-            "description": (
-                "Delegate a coding or technical task to the coding specialist. "
-                "The coder receives the parent assistant's existing conversation context, "
-                "including relevant user messages, previous discussion, tool calls, "
-                "tool results, source code, and logs. "
-                "Do not use the delegation fields to repeat information the coder can already see. "
-                "The parent assistant should provide the exact task and only any additional "
-                "handoff guidance that is genuinely useful. "
-                "The coder can use its available tools to retrieve additional context "
-                "when the inherited context is insufficient."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": (
-                            "A concise statement of the exact task the coding specialist "
-                            "must perform."
-                        ),
-                    },
-                    "context": {
-                        "type": "string",
-                        "description": (
-                            "A concise handoff with only additional context the coder needs "
-                            "to understand or execute the task. "
-                            "Do not paraphrase or repeat the user's request, source code, logs, "
-                            "conversation history, or tool results—the coder can already see them. "
-                            "Do not manually include tool results in this field; tool calls and "
-                            "their results are already available to the coder. "
-                            "If the inherited context is insufficient, the coder can use the "
-                            "available tools to retrieve additional context. "
-                            "Use this field only for important interpretation, constraints, "
-                            "decisions, or guidance that is not already available to the coder. "
-                            "Leave empty when no additional context is needed."
-                        ),
-                    },
-                },
-                "required": [
-                    "task",
-                    "context",
-                ],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
     "type": "function",
     "function": {
         "name": "search_current_chat",
@@ -380,12 +332,7 @@ for tool in TOOLS:
 
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {}
 
-CONTROL_TOOLS = {
-    # "high_thinking",
-    # "xhigh_thinking",
-    "call_coder",
-
-}
+CONTROL_TOOLS = set()
 
 def register_tool(name: str, function: Callable[..., Any]) -> None:
     TOOL_FUNCTIONS[name] = function

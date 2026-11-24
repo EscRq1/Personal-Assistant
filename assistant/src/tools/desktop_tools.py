@@ -25,8 +25,8 @@ ACT_FRAME_DESCRIPTION = (
     'An old/expired frame is rejected. For a small/uncertain target, obtain a close-up first.'
 )
 DESKTOP_INSTRUCTIONS = (
-    "Desktop tools operate the configured X11 desktop. First call ask_desktop_access and wait for approval. "
-    "Access lasts only for this turn. A denial means no desktop use. After approval call desktop_observe before acting. "
+    "Desktop tools operate the configured X11 desktop. If desktop tools are unavailable, call ask_desktop_access and wait for approval. "
+    "Access lasts only for this turn. A denial means no desktop use. When access is available, call desktop_observe before acting. "
     "Use the frame_id and image-local pixel coordinates from the latest desktop image. "
     "Call one desktop tool per generation. Each action returns a new full-screen image. "
     "For precise targets such as an input textarea, a specific chat-list row or a small control, "

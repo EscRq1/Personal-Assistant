@@ -1141,7 +1141,7 @@ class Main:
         # 2. Retrieve context
         # --------------------------------------------------------
 
-        if estimate_tokens(user_input) <= 2000:
+        if ctx.memory_access and estimate_tokens(user_input) <= 2000:
             context_data = self.memory.get_raw_context(
                 user_input,
                 k=20,
@@ -1543,6 +1543,13 @@ def parse_reasoning_budget(value):
         return -1
 
 
+@app.get("/models")
+async def models():
+    controller = assistant.llm
+    return {"models": [{"id": alias, "name": alias, "observer": alias == controller.support_model}
+                       for alias in controller.models], "default": controller.assistant_model}
+
+
 @app.post("/ask")
 async def ask(request: Request):
     ctx = ExecutionContext()
@@ -1620,24 +1627,15 @@ async def _ask_reserved(request: Request, ctx):
 
         ctx.assistant_thinking_mode = form.get(
             "m-assist",
-            "",
+            "low",
         )
 
         ctx.assistant_thinking_budget = parse_reasoning_budget(
             form.get("b-assist", "")
         )
 
-        ctx.coder_thinking_mode = form.get(
-            "m-coder",
-            "",
-        )
-
-        ctx.coder_thinking_budget = parse_reasoning_budget(
-            form.get("b-coder", "")
-        )
-
         ctx.tool_calling_budget = parse_reasoning_budget(
-            form.get("b-tools", "")
+            form.get("b-tools", "8")
         )
 
         images = None
@@ -1665,29 +1663,33 @@ async def _ask_reserved(request: Request, ctx):
 
         ctx.assistant_thinking_mode = data.get(
             "m-assist",
-            "",
+            "low",
         )
 
         ctx.assistant_thinking_budget = parse_reasoning_budget(
             data.get("b-assist")
         )
 
-        ctx.coder_thinking_mode = data.get(
-            "m-coder",
-            "",
-        )
-
-        ctx.coder_thinking_budget = parse_reasoning_budget(
-            data.get("b-coder")
-        )
-
         ctx.tool_calling_budget = parse_reasoning_budget(
-            data.get("b-tools")
+            data.get("b-tools", 8)
         )
 
         images = None
 
-    print(f"{Fore.BLUE}[DEBUG] Context: {ctx.assistant_thinking_mode}, {ctx.assistant_thinking_budget}, {ctx.coder_thinking_mode}, {ctx.coder_thinking_budget}")
+
+    options = form if is_multipart else data
+    ctx.model = options.get("model") or assistant.llm.assistant_model
+    if not isinstance(ctx.model, str) or ctx.model not in assistant.llm.models:
+        raise UploadError("Choose a model listed in models.ini.")
+    if not isinstance(ctx.assistant_thinking_mode, str) or ctx.assistant_thinking_mode not in {"low", "medium", "high", "xhigh"}:
+        raise UploadError("Thinking mode must be low, medium, high, or xhigh.")
+    if ctx.assistant_thinking_budget < -1 or ctx.tool_calling_budget < 0:
+        raise UploadError("Thinking budget must be -1 or nonnegative; tool iterations must be nonnegative.")
+    def enabled(value):
+        return value is True or (isinstance(value, str) and value.lower() == "true")
+    ctx.web_access = enabled(raw_search)
+    ctx.memory_access = enabled(options.get("memory_access", False))
+    ctx.desktop_access = enabled(options.get("desktop_access", False))
 
     if not isinstance(query, str) or (chat_id is not None and not isinstance(chat_id, str)):
         raise UploadError("query and chat_id must be text.")
