@@ -228,7 +228,7 @@ class Controller:
                 self._queue_put(loop, queue, ("done", None))
                 return
 
-            ctx.begin_llm()
+            ctx.begin_llm(payload["model"])
 
             try:
                 response = requests.post(
@@ -275,6 +275,7 @@ class Controller:
                     )
 
                     if reasoning_token:
+                        ctx.llm_phase = "decode"
                         self._queue_put(
                             loop,
                             queue,
@@ -292,6 +293,7 @@ class Controller:
                     tool_deltas = delta.get("tool_calls")
 
                     if tool_deltas:
+                        ctx.llm_phase = "decode"
                         self.tool_controller.merge_tool_call_deltas(
                             accumulated_tools,
                             tool_deltas,
@@ -338,8 +340,8 @@ class Controller:
             ctx.abort_response_socket()
             await asyncio.sleep(0.02)
         # Prefill may require a router restart. The stream is drained before it.
-        await asyncio.to_thread(self.router.kill)
         ctx.router_restart_required.set()
+        await asyncio.to_thread(self.router.kill)
 
     async def _stream_llm_with_tools(
         self,
@@ -408,15 +410,13 @@ class Controller:
             
         finally:
             if update_watchdog is not None:
-                update_watchdog.cancel()
+                if not ctx.router_restart_required.is_set():
+                    update_watchdog.cancel()
                 await asyncio.gather(update_watchdog, return_exceptions=True)
             # Never start another physical request while this worker is alive.
             await asyncio.to_thread(worker.join)
             if ctx.router_restart_required.is_set() and not ctx.cancel_event.is_set():
-                await asyncio.to_thread(self.router.restart)
-                self.resources.current_owner = None
-                self.resources.reconcile()
-                ctx.router_restart_required.clear()
+                await asyncio.to_thread(self._restart_router_and_restore_model, ctx)
 
     #We need to kill the threads even if they are blocked once the cancel flag is set
     #Otherwise the threads won't be closed and will occupy the ram, slowing down the machine
@@ -873,7 +873,7 @@ class Controller:
             )
 
             if ctx:
-                ctx.begin_llm()
+                ctx.begin_llm(payload["model"])
 
             response = None
 
@@ -1000,31 +1000,38 @@ class Controller:
                     yield result
 
         finally:
-            watchdog.cancel()
-
-            if ctx.router_restart_required.is_set():
+            try:
+                # An Observer/tool worker can outlive its async caller. Let the
+                # watchdog finish stopping it before deciding recovery is done.
+                if not ctx.cancel_event.is_set():
+                    watchdog.cancel()
+                await asyncio.gather(watchdog, return_exceptions=False)
+            except asyncio.CancelledError:
+                # A normally cancelled watchdog has no cleanup work left.
+                if not watchdog.cancelled():
+                    raise
+            finally:
                 try:
-                    # Let the worker that owned the killed HTTP request
-                    # finish unwinding before the router is restarted
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.to_thread(ctx.llm_done.wait),
-                            timeout=2.0,
-                        )
-                    except asyncio.TimeoutError:
-                        pass
-
-                    await asyncio.to_thread(
-                        self.router.restart
-                    )
-
-                    self.resources.current_owner = None
-                    self.resources.reconcile()
-
+                    if ctx.router_restart_required.is_set():
+                        await asyncio.to_thread(self._restart_router_and_restore_model, ctx)
                 finally:
-                    ctx.router_restart_required.clear()
+                    _execution_context.reset(context_token)
 
-            _execution_context.reset(context_token)
+    def _restart_router_and_restore_model(self, ctx):
+        """Recover a forced stop before releasing logical generation ownership."""
+        # This lock also waits for any killed physical request to unwind.
+        # Do not call this on the asyncio thread: loading weights may take time.
+        with self.resources.lock:
+            if not ctx.router_restart_required.is_set():
+                return
+            alias = ctx.active_model or ctx.model or self.resources.assistant_model
+            self.resources.current_owner = None
+            self.router.restart()
+            self.resources.reconcile()
+            self.resources.select_model(alias)
+            self.resources.acquire("assistant")
+            ctx.router_restart_required.clear()
+            print(f"[CANCEL] Restored resident model: {alias}")
 
     def web_call(
         self,
@@ -1899,6 +1906,7 @@ class ExecutionContext:
 
 
 
+        self.active_model = None
         self.llm_phase = ""
         # Stage events and generated output share one request-scoped FIFO.
         self.stream_queue = Queue()
@@ -1980,7 +1988,8 @@ class ExecutionContext:
                 {"backend_stage": deepcopy(stage)},
             ))
 
-    def begin_llm(self):
+    def begin_llm(self, model=None):
+        self.active_model = model
         self.llm_done.clear()
         self.llm_active.set()
         self.llm_phase = "prefill"
@@ -2016,17 +2025,30 @@ class ExecutionContext:
         try:
             raw = response.raw
             conn = getattr(raw, "_connection", None)
-
             sock = getattr(conn, "sock", None)
-
+            if sock is None:
+                # urllib3 may detach conn.sock once the response owns the
+                # connection; the buffered HTTPResponse still has the socket.
+                fp = getattr(getattr(raw, "_fp", None), "fp", None)
+                sock = getattr(getattr(fp, "raw", None), "_sock", None)
             if sock is not None:
                 try:
                     sock.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
+        except Exception as exc:
+            print(f"[CANCEL] socket shutdown failed: {exc}")
 
-        except Exception as e:
-            print(f"[CANCEL] socket shutdown failed: {e}")
+    async def wait_for_llm_stop(self, timeout):
+        """Poll without leaving an Event.wait thread behind on timeout."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while not self.llm_done.is_set():
+            if loop.time() >= deadline:
+                return False
+            self.abort_response_socket()
+            await asyncio.sleep(0.02)
+        return True
 
     async def abort_event_observer(
         self,
@@ -2034,94 +2056,31 @@ class ExecutionContext:
         graceful_timeout=0.5,
         terminate_timeout=0.5,
     ):
-        """
-        Multi-stage cancellation watchdog:\n
-
-        Stage 1: the normal pipeline sees cancel_event\n
-        Stage 2: close the active HTTP response\n
-        Stage 3: give the request a short grace period\n
-        Stage 4: SIGTERM the llama router\n
-        Stage 5: give router termination a short grace period\n
-        Stage 6: SIGKILL the router if it is still alive\n
-        """
-
-        # The actual blocking LLM/web/tool work is now off the asyncio
-        # event-loop thread, so a small polling loop here is safe and avoids
-        # leaking a worker thread when this watchdog is cancelled normally.
+        """Kill prefill immediately; disconnect decoding before escalating."""
         while not self.cancel_event.is_set():
             await asyncio.sleep(0.02)
 
-        print(f"{Fore.RED}[CANCEL] Cancellation requested")
-
-        # Cancellation during a blocking tool/web operation does not have a
-        # safe way to kill its Python worker thread. The async side will stop
-        # waiting for that result and unwind. An active LLM request, however,
-        # can be terminated at the router-process level.
         if not self.llm_active.is_set():
-            print(f"{Fore.RED}[CANCEL] No active LLM request")
             return
-
-        # Stage 2: close active HTTP response
-
-
         print(f"{Fore.RED}[CANCEL] Closing active HTTP response")
         self.abort_response_socket()
-
-        #SPECIAL CASE(prefill/observer call)
-        #Since llama.cpp stops tracking status of http requests during prefill
-        #phase, we should force kill llama instead of waiting for end of prompt processing
-        #Especially critical when the input prompt is large(10k+ tokens)
-        #Also, since observer does not stream its tokens but output a complete JSON,
-        #it is impossible to dynamically track the phase and abort generation
-        #So the only way to abort active observer generation is to terminate the llama server
-
-        if (self.llm_phase == "prefill" or
-        controller.resources.current_owner == "observer"):
-            controller.router.kill()
+        # Preserve immediate process cancellation during prefill. Recovery
+        # reloads active_model before releasing generation ownership.
+        if self.llm_phase == "prefill":
+            print("[CANCEL] Prefill interrupted; restarting and restoring active model")
             self.router_restart_required.set()
-            return
-            
-
-        # Stage 3: graceful request unwind
-
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(self.llm_done.wait),
-                timeout=graceful_timeout,
-            )
-
-            print(f"{Fore.RED}[CANCEL] HTTP request stopped gracefully")
+            await asyncio.to_thread(controller.router.kill)
             return
 
-        except asyncio.TimeoutError:
-            pass
+        # During decoding, disconnecting the request should keep weights resident.
+        # Reasoning/tool-call tokens count as decoding, including on Observer.
+        if await self.wait_for_llm_stop(graceful_timeout):
+            print("[CANCEL] Request stopped; keeping model resident")
+            return
 
-
-        # Stage 4: terminate router
-
-
-        print(f"{Fore.RED}[CANCEL] HTTP request still active; terminating router")
-
-        controller.router.terminate()
+        print("[CANCEL] Request did not drain; restarting with model restoration")
         self.router_restart_required.set()
-
-        try:
-            await asyncio.wait_for(
-                asyncio.to_thread(self.llm_done.wait),
-                timeout=terminate_timeout,
-            )
-
-            print(f"{Fore.RED}[CANCEL] Router termination stopped inference")
+        await asyncio.to_thread(controller.router.terminate)
+        if await self.wait_for_llm_stop(terminate_timeout):
             return
-
-        except asyncio.TimeoutError:
-            pass
-
-
-        # Stage 6: force kill
-
-
-        print(f"{Fore.RED}[CANCEL] Router still active; force killing")
-
-        controller.router.kill()
-        self.router_restart_required.set()
+        await asyncio.to_thread(controller.router.kill)
