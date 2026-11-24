@@ -1681,8 +1681,8 @@ async def _ask_reserved(request: Request, ctx):
     ctx.model = options.get("model") or assistant.llm.assistant_model
     if not isinstance(ctx.model, str) or ctx.model not in assistant.llm.models:
         raise UploadError("Choose a model listed in models.ini.")
-    if not isinstance(ctx.assistant_thinking_mode, str) or ctx.assistant_thinking_mode not in {"low", "medium", "high", "xhigh"}:
-        raise UploadError("Thinking mode must be low, medium, high, or xhigh.")
+    if not isinstance(ctx.assistant_thinking_mode, str) or ctx.assistant_thinking_mode not in {"low", "medium", "xhigh"}:
+        raise UploadError("Thinking mode must be low, medium, or xhigh.")
     if ctx.assistant_thinking_budget < -1 or ctx.tool_calling_budget < 0:
         raise UploadError("Thinking budget must be -1 or nonnegative; tool iterations must be nonnegative.")
     def enabled(value):
